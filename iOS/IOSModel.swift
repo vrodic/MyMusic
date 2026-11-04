@@ -13,6 +13,9 @@ final class IOSModel: ObservableObject {
 
     @AppStorage("deviceID") var deviceID = UUID().uuidString
     @AppStorage("deviceName") var deviceName = "iPhone"
+    @Published private(set) var users: [SyncStore.User] = []
+    @Published private(set) var currentUser = SyncStore.defaultUserID
+    @Published private(set) var playlists: [SyncStore.Playlist] = []
     @AppStorage("manualServer") var manualServer = ""
     @AppStorage("removeDeletedOnSync") var removeDeleted = true
     @Published var isScanning = false
@@ -29,6 +32,14 @@ final class IOSModel: ObservableObject {
         try? FileManager.default.createDirectory(at: Self.musicDir, withIntermediateDirectories: true)
         db = try! LibraryDB(path: Self.supportDir.appendingPathComponent("library.sqlite").path,
                             extraMigrations: [LibraryDB.favoriteAtMigration])
+        db.currentUser = UserDefaults.standard.string(forKey: "currentUser") ?? SyncStore.defaultUserID
+        // one-time: this phone's counts and hearts into the replicated store, under the id the Mac
+        // already knows this phone by (so its earlier backups line up and nothing doubles)
+        let did = UserDefaults.standard.string(forKey: "deviceID") ?? UUID().uuidString
+        UserDefaults.standard.set(did, forKey: "deviceID")
+        // "legacy-iPhone": where the Mac filed this phone's old backups (by the default device name,
+        // whatever the phone is called now), so the history lands in the same counter and isn't doubled
+        db.migrateLegacyStats(replica: did, historyReplica: "legacy-iPhone")
         store = LibraryStore(db: db)
         var webRef: (() -> WebLibrary?) = { nil }
         player = PlayerEngine(urlFor: { t in
@@ -44,7 +55,59 @@ final class IOSModel: ObservableObject {
             if t.origin == .remote { self?.web.reportSkip(t) } else { self?.store.recordSkip(t) }
         }
         browser.start()
+        loadUser()
         Task { await scanLocal() }
+    }
+
+    // MARK: users & playlists
+
+    func loadUser() {
+        users = db.sync.users()
+        currentUser = db.currentUser
+        playlists = db.sync.playlists(user: currentUser)
+    }
+
+    func switchUser(_ id: String) {
+        guard id != db.currentUser else { return }
+        db.currentUser = id
+        UserDefaults.standard.set(id, forKey: "currentUser")
+        loadUser()
+        Task {
+            await offMain { [db] in db.refreshCache() }
+            await store.reloadNow()
+            player.refreshAll(store.track)
+        }
+    }
+
+    func addUser(_ name: String) {
+        db.sync.saveUser(id: UUID().uuidString, name: name)
+        loadUser()
+    }
+
+    func renameUser(_ id: String, _ name: String) { db.sync.saveUser(id: id, name: name); loadUser() }
+
+    @discardableResult
+    func createPlaylist(_ name: String, with tracks: [Track] = []) -> String {
+        let p = SyncStore.Playlist(id: UUID().uuidString, userID: currentUser, name: name, items: tracks.map(\.relPath))
+        db.sync.savePlaylist(p)
+        loadUser()
+        return p.id
+    }
+
+    func addToPlaylist(_ id: String, _ tracks: [Track]) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        let have = Set(p.items)
+        p.items += tracks.map { SyncStore.key($0.relPath) }.filter { !have.contains($0) }
+        db.sync.savePlaylist(p)
+        loadUser()
+    }
+
+    func savePlaylist(_ p: SyncStore.Playlist) { db.sync.savePlaylist(p); loadUser() }
+
+    /// Songs of a playlist that are on this phone (the rest can be streamed from the web player).
+    func tracks(in p: SyncStore.Playlist) -> [Track] {
+        let byKey = Dictionary(store.tracks.map { (SyncStore.key($0.relPath), $0) }, uniquingKeysWith: { a, _ in a })
+        return p.items.compactMap { byKey[$0] }
     }
 
     func url(for t: Track) -> URL { Self.musicDir.appendingFile(t.relPath) }

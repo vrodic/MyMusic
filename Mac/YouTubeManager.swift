@@ -41,6 +41,22 @@ final class YouTubeManager: ObservableObject {
     private let rootIsRemote: () -> Bool
     /// Your own (non-YouTube) songs, for "already in library?" matching.
     var libraryProvider: () -> [Track] = { [] }
+    /// Tell the other Macs soon (claims and finished downloads matter quickly).
+    var onSharedChange: () -> Void = {}
+
+    /// Another Mac changed the shared queue: take it over, and index files it downloaded.
+    func applySync(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let downloaded = db.applySyncedYT(ids)
+        reload()
+        if let cur = currentID, ids.contains(cur), db.ytClaimedElsewhere().contains(cur), !currentForced {
+            appendLog("another Mac is downloading the current song; stopping here")
+            cancelCurrent()
+        }
+        for rel in downloaded { Task { await onDownloaded(rel) } }
+        if !downloaded.isEmpty { appendLog("\(downloaded.count) songs downloaded by another Mac") }
+        poke()
+    }
     @Published private(set) var isMatching = false
 
     init(db: LibraryDB, root: @escaping () -> URL?, rootIsRemote: @escaping () -> Bool, onDownloaded: @escaping (String) async -> Void) {
@@ -290,7 +306,11 @@ final class YouTubeManager: ObservableObject {
                 forcedQueue.removeFirst()
                 if let item = db.ytItem(id), item.status != .done {
                     waitReason = nil
+                    _ = db.sync.claim(item.videoID)   // you asked for it here: download even if claimed elsewhere
+                    onSharedChange()
                     await download(item, root: root, ytdlp: ytdlp, forced: true)
+                    db.sync.releaseClaim(item.videoID)
+                    onSharedChange()
                 }
                 continue
             }
@@ -302,7 +322,12 @@ final class YouTubeManager: ObservableObject {
                     continue
                 }
                 waitReason = nil
+                // claim it so another Mac doesn't fetch the same song; give the claim a moment to spread
+                guard db.sync.claim(next.videoID) else { continue }
+                onSharedChange()
                 await download(next, root: root, ytdlp: ytdlp, forced: false)
+                db.sync.releaseClaim(next.videoID)
+                onSharedChange()
                 continue
             }
             waitReason = nil

@@ -33,9 +33,8 @@ struct StatsView: View {
     private func summarize() -> Summary {
         var s = Summary()
         s.tracks = store.tracks
-        s.devicePlays = model.db.devicePlayTotals()
-        let dp = s.devicePlays
-        s.combined = s.tracks.map { Combined(track: $0, plays: $0.playCount + (dp[$0.relPath]?.plays ?? 0)) }
+        // play counts already include every device (and the web player) for the current user
+        s.combined = s.tracks.map { Combined(track: $0, plays: $0.playCount) }
         s.totalBytes = s.tracks.reduce(Int64(0)) { $0 + $1.size }
         s.totalDuration = s.tracks.reduce(0.0) { $0 + ($1.duration ?? 0) }
         s.totalPlays = s.combined.reduce(0) { $0 + $1.plays }
@@ -52,7 +51,7 @@ struct StatsView: View {
         var dec: [Int: Int] = [:]
         for y in s.tracks.compactMap(\.year) where y > 1900 { dec[y / 10 * 10, default: 0] += 1 }
         s.decades = dec.sorted { $0.key < $1.key }.map { (decade: $0.key, count: $0.value) }
-        s.favorites = s.tracks.filter { $0.favorite || (dp[$0.relPath]?.favorite ?? false) }.count
+        s.favorites = s.tracks.filter(\.favorite).count
         s.neverPlayed = s.combined.filter { $0.plays == 0 }.count
         return s
     }

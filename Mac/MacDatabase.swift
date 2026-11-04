@@ -114,8 +114,65 @@ extension LibraryDB {
 
     // MARK: YouTube
 
+    // MARK: YouTube queue replication (shared with the other Macs through SyncStore)
+
+    /// Send these songs' current state to the other Macs: `user` = priority/favorite/override
+    /// changed, `download` = download state changed.
+    func publishYT(_ ids: [String], user: Bool, download: Bool, info: Bool = false) {
+        guard !ids.isEmpty else { return }
+        let want = Set(ids)
+        try? db.transaction {
+            for it in ytItems() where want.contains(it.videoID) {
+                var f: [String: Any] = [:]
+                if info || user || download {
+                    f["title"] = it.title; f["playlistIndex"] = it.playlistIndex; f["inPlaylist"] = it.inPlaylist
+                    if let u = it.uploader { f["uploader"] = u }
+                    if let d = it.duration { f["duration"] = d }
+                }
+                if user { f["priority"] = it.priority.rawValue; f["favorite"] = it.favorite; f["matchOverride"] = it.matchOverride }
+                if download {
+                    f["status"] = it.status == .downloading ? YTStatus.pending.rawValue : it.status.rawValue
+                    f["relPath"] = it.relPath ?? NSNull(); f["error"] = it.error ?? NSNull(); f["attempts"] = it.attempts
+                }
+                sync.putYT(id: it.videoID, fields: f, user: user, download: download, done: it.status == .done)
+            }
+        }
+    }
+
+    /// Take the other Macs' YouTube changes into the local queue. Returns songs that another Mac
+    /// downloaded (so this Mac can index the file it now sees on the shared drive).
+    func applySyncedYT(_ ids: [String]? = nil) -> [String] {
+        let want = ids.map(Set.init)
+        let local = Dictionary(uniqueKeysWithValues: ytItems().map { ($0.videoID, $0) })
+        var downloadedElsewhere: [String] = []
+        try? db.transaction {
+            for (id, doc, done) in sync.ytDocs() where want?.contains(id) ?? true {
+                let title = doc["title"] as? String ?? id
+                if local[id] == nil {
+                    try db.execute("INSERT INTO yt_items (video_id, title, uploader, duration, playlist_index, priority, added_at, in_playlist) VALUES (?,?,?,?,?,?,?,?)",
+                                   [id, title, doc["uploader"] as? String, doc["duration"] as? Double, doc["playlistIndex"] as? Int ?? 0,
+                                    doc["priority"] as? Int ?? YTPriority.normal.rawValue, Date().timeIntervalSince1970, (doc["inPlaylist"] as? Bool ?? true)])
+                }
+                if let p = doc["priority"] as? Int {
+                    try db.execute("UPDATE yt_items SET priority = ?, favorite = ?, match_override = ? WHERE video_id = ?",
+                                   [p, doc["favorite"] as? Bool ?? false, doc["matchOverride"] as? Bool ?? false, id])
+                }
+                if let st = doc["status"] as? String {
+                    let cur = local[id]
+                    // never interrupt our own running download with someone else's older state
+                    if cur?.status == .downloading && !done { continue }
+                    try db.execute("UPDATE yt_items SET status = ?, rel_path = COALESCE(?, rel_path), error = ?, attempts = ? WHERE video_id = ?",
+                                   [done ? YTStatus.done.rawValue : st, doc["relPath"] as? String, doc["error"] as? String, doc["attempts"] as? Int ?? 0, id])
+                    if done, cur?.status != .done, let rel = doc["relPath"] as? String { downloadedElsewhere.append(rel) }
+                }
+            }
+        }
+        return downloadedElsewhere
+    }
+
     func setYTFavorite(_ ids: [String], _ fav: Bool) {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET favorite = ? WHERE video_id = ?", [fav, id]) } }
+        publishYT(ids, user: true, download: false)
     }
 
     func markYTAttempt(_ id: String) {
@@ -146,6 +203,11 @@ extension LibraryDB {
 
     /// Upserts the liked playlist. New items get `defaultPriority`; existing items keep their priority/status.
     func syncYTPlaylist(_ entries: [(id: String, title: String, uploader: String?, duration: Double?)], defaultPriority: YTPriority) throws {
+        let known = Set(ytItems().map(\.videoID))
+        defer {
+            // newly liked songs go to the other Macs (just the song; their priority stays each Mac's until changed)
+            publishYT(entries.map(\.id).filter { !known.contains($0) }, user: false, download: false, info: true)
+        }
         try db.transaction {
             try db.execute("UPDATE yt_items SET in_playlist = 0")
             for (i, e) in entries.enumerated() {
@@ -161,15 +223,18 @@ extension LibraryDB {
 
     func setYTPriority(_ ids: [String], _ p: YTPriority) {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET priority = ? WHERE video_id = ?", [p.rawValue, id]) } }
+        publishYT(ids, user: true, download: false)
     }
 
     func setYTStatus(_ id: String, _ s: YTStatus, relPath: String? = nil, error: String? = nil) {
         try? db.execute("UPDATE yt_items SET status = ?, rel_path = COALESCE(?, rel_path), error = ?, attempts = attempts + (CASE WHEN ? = 'failed' THEN 1 ELSE 0 END) WHERE video_id = ?",
                         [s.rawValue, relPath, error, s.rawValue, id])
+        if s != .downloading { publishYT([id], user: false, download: true) }
     }
 
     func resetYT(_ ids: [String]) {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET status='pending', attempts=0, error=NULL WHERE video_id = ?", [id]) } }
+        publishYT(ids, user: false, download: true)
     }
 
     func resetStuckDownloads() { try? db.execute("UPDATE yt_items SET status='pending' WHERE status='downloading'") }
@@ -185,6 +250,7 @@ extension LibraryDB {
 
     func setYTMatchOverride(_ ids: [String], _ on: Bool) {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET match_override = ? WHERE video_id = ?", [on, id]) } }
+        publishYT(ids, user: true, download: false)
     }
 
     /// "It's in my library": mark by hand (score 1, no automatic re-check overrides that).
@@ -192,8 +258,16 @@ extension LibraryDB {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET match_score = 1.0, match_override = 0, library_match = '' WHERE video_id = ?", [id]) } }
     }
 
+    /// Songs another Mac is downloading right now.
+    func ytClaimedElsewhere() -> Set<String> {
+        let me = sync.replicaID
+        return Set(((try? db.query("SELECT video_id FROM sync_claims WHERE until > ? AND replica != ?", [SyncStore.now(), me])) ?? []).compactMap { $0.string("video_id") })
+    }
+
     func nextYTDownload(maxAttempts: Int = 3) -> YTItem? {
-        ytItems().filter { $0.priority != .skip && !$0.likelyInLibrary && ($0.status == .pending || ($0.status == .failed && $0.attempts < maxAttempts)) }
+        let elsewhere = ytClaimedElsewhere()
+        return ytItems().filter { $0.priority != .skip && !$0.likelyInLibrary && !elsewhere.contains($0.videoID)
+            && ($0.status == .pending || ($0.status == .failed && $0.attempts < maxAttempts)) }
             .sorted { ($0.priority.rawValue, -$0.playlistIndex, -$0.attempts) > ($1.priority.rawValue, -$1.playlistIndex, -$1.attempts) }
             .first
     }
@@ -210,8 +284,47 @@ extension LibraryDB {
                                [up.deviceID, e.relPath, e.playCount, e.skipCount, e.lastPlayed, e.favorite])
             }
         }
-        // Favorites are shared state: newest change (Mac or iPhone) wins, so hearts match everywhere.
-        applyRemoteFavorites(up.entries.map { ($0.relPath, $0.favorite, $0.favoriteAt) })
+        // Into the replicated store: that device's own counter cells, and favorites (newest wins).
+        // An iPhone with the old app sends its whole history each time under a new random id, so its
+        // counts go into the one "legacy-iPhone" counter (max per song), never a new one per sync.
+        let user = up.userID ?? SyncStore.defaultUserID
+        let replica = up.deviceID.hasPrefix("web-") ? up.deviceID : (up.userID == nil ? "legacy-iPhone" : up.deviceID)
+        try? db.transaction {
+            for e in up.entries where e.playCount > 0 || e.skipCount > 0 {
+                sync.setCounts(user: user, relPath: e.relPath, replica: replica, plays: e.playCount, skips: e.skipCount, lastPlayed: e.lastPlayed)
+            }
+        }
+        applyRemoteFavorites(up.entries.map { ($0.relPath, $0.favorite, $0.favoriteAt) }, by: up.deviceID)
+        refreshCache(up.entries.map(\.relPath))
+    }
+
+    /// Legacy per-device backups as replicated counter cells (one-time migration). Older iPhone
+    /// apps didn't keep their device id, so one phone shows up under several ids, each a full
+    /// snapshot of its counts: those are grouped by device name, taking the highest count per song
+    /// (the phone files its own history under the same "legacy-<name>" cell, so nothing doubles).
+    /// The web player's id was always stable and stays as is.
+    func legacyDeviceCells() -> [SyncStore.PlayCell] {
+        let rows = (try? db.query("""
+            SELECT s.device_id, COALESCE(d.name, 'iPhone') AS name, s.rel_path, s.play_count, s.skip_count, s.last_played
+            FROM device_stats s LEFT JOIN devices d USING (device_id) WHERE s.play_count > 0 OR s.skip_count > 0
+            """)) ?? []
+        var cells: [String: SyncStore.PlayCell] = [:]
+        for r in rows {
+            let id = r.string("device_id") ?? ""
+            let replica = id.hasPrefix("web-") ? id : "legacy-" + (r.string("name") ?? "iPhone")
+            let k = SyncStore.key(r.string("rel_path") ?? "")
+            let key = replica + "\u{1}" + k
+            var c = cells[key] ?? SyncStore.PlayCell(u: SyncStore.defaultUserID, k: k, r: replica, p: 0, s: 0, l: nil)
+            c.p = max(c.p, r.int("play_count") ?? 0)
+            c.s = max(c.s, r.int("skip_count") ?? 0)
+            if let l = r.double("last_played") { c.l = max(c.l ?? 0, l) }
+            cells[key] = c
+        }
+        return Array(cells.values)
+    }
+
+    func legacyMerges() -> [(String, String)] {
+        ((try? db.query("SELECT old, keep FROM merged_paths")) ?? []).compactMap { r in r.string("old").flatMap { o in r.string("keep").map { (o, $0) } } }
     }
 
     func deviceBackups() -> [DeviceBackup] {

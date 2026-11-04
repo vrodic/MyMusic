@@ -62,6 +62,7 @@ struct ServerInfo: Codable {
     var apiVersion: Int
     var trackCount: Int
     var syncedTrackCount: Int
+    var replica: String? = nil     // the Mac's sync id (so Macs can tell each other apart)
 }
 
 struct PlayStatEntry: Codable, Hashable {
@@ -77,6 +78,7 @@ struct StatsUpload: Codable {
     var deviceID: String
     var deviceName: String
     var entries: [PlayStatEntry]
+    var userID: String? = nil
 }
 
 /// The iPhone's sync progress, posted to the Mac while it syncs.
@@ -108,6 +110,7 @@ struct WebPlayerInfo: Codable, Hashable {
     var macBackupAt: String?
     var lastMacSync: String?
     var macName: String?
+    var replica: String? = nil
 }
 
 struct DeviceBackup: Codable, Identifiable, Hashable {

@@ -10,6 +10,8 @@ struct TrackTable: View {
     /// What the rows depend on besides library growth (search text, folder…). When it changes the
     /// table is rebuilt instead of diffed; a song arriving from a download still updates in place.
     var resetKey: String = ""
+    /// Set when showing a playlist: adds Remove / Move to Top.
+    var playlistID: String? = nil
     @State private var sortOrder: [KeyPathComparator<Track>] = []
     @State private var selection = Set<Track.ID>()
     @State private var confirmFavorite = false
@@ -47,6 +49,12 @@ struct TrackTable: View {
             Divider()
             Button("Toggle Favorite") { picked.forEach(model.toggleFavorite) }
             SyncMenuItem(paths: picked.map(\.relPath))
+            Divider()
+            PlaylistMenu(tracks: picked)
+            if let pid = playlistID {
+                Button("Remove from Playlist") { model.removeFromPlaylist(pid, picked) }
+                if let first = picked.first { Button("Move to Top") { model.movePlaylistItem(pid, first, toTop: true) } }
+            }
             if let first = picked.first { Button("Show in Finder") { model.revealInFinder(first) } }
         } primaryAction: { ids in
             play(rows.first { ids.contains($0.id) }, in: rows)
@@ -318,6 +326,20 @@ struct SyncMenuItem: View {
                 Label(allSynced ? "Remove \(noun.isEmpty ? "" : noun + " ")from iPhone Sync" : "Add \(noun.isEmpty ? "" : noun + " ")to iPhone Sync",
                       systemImage: allSynced ? "iphone.slash" : "iphone.and.arrow.forward")
             }
+        }
+    }
+}
+
+/// "Add to Playlist ▸" for one or more songs.
+struct PlaylistMenu: View {
+    @EnvironmentObject var model: AppModel
+    let tracks: [Track]
+
+    var body: some View {
+        Menu("Add to Playlist") {
+            ForEach(model.playlists) { p in Button(p.name) { model.addToPlaylist(p.id, tracks) } }
+            if !model.playlists.isEmpty { Divider() }
+            Button("New Playlist…") { if let n = Ask.text("New playlist") { model.createPlaylist(n, with: tracks) } }
         }
     }
 }

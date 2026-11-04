@@ -125,13 +125,17 @@ final class SyncManager: ObservableObject {
         report(base, .starting, "Backing up stats…", force: true)
 
         // 1. back up stats to the Mac first, so nothing is lost even if the download part fails
-        await uploadStats(base: base)
+        // the Mac's sync id (nil = an older Mac app: fall back to the old stats upload)
+        let macInfo = try? JSONDecoder().decode(ServerInfo.self, from: (try? await session.data(from: base.appendingPathComponent("api/info")))?.0 ?? Data())
+        if let mac = macInfo?.replica { await pushChanges(base: base, mac: mac) } else { await uploadStats(base: base) }
 
         // 2. manifest
         status = "Fetching library…"
         let manifest: LibraryManifest
         do {
-            let (data, resp) = try await session.data(from: base.appendingPathComponent("api/library"))
+            var lc = URLComponents(url: base.appendingPathComponent("api/library"), resolvingAgainstBaseURL: false)!
+            lc.queryItems = [URLQueryItem(name: "user", value: model.db.currentUser)]   // this user's folders, favorites, playlists
+            let (data, resp) = try await session.data(from: lc.url!)
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else { status = "Server error"; return }
             manifest = try JSONDecoder().decode(LibraryManifest.self, from: data)
         } catch {
@@ -197,13 +201,20 @@ final class SyncManager: ObservableObject {
         }
 
         applyPendingRestore()
-        // Favorites: take the Mac's state where it changed more recently (the Mac already merged ours).
-        let favChanges = model.db.applyRemoteFavorites(manifest.tracks.map { ($0.relPath, $0.favorite, $0.favoriteAt) })
+        // plays, favorites, users and playlists from every other device, through the Mac
+        var favChanges = 0
+        if let mac = macInfo?.replica {
+            favChanges = await pullChanges(base: base, mac: mac)
+        } else {
+            favChanges = model.db.applyRemoteFavorites(manifest.tracks.map { ($0.relPath, $0.favorite, $0.favoriteAt) })
+        }
+        await offMain { [db = model.db] in db.refreshCache() }
+        model.loadUser()
         await model.store.reloadNow()
         model.player.refreshAll(model.store.track)
         if !Task.isCancelled {
             lastSync = Date().timeIntervalSince1970
-            status = "Synced \(done) new/changed, removed \(removed)" + (favChanges > 0 ? ", \(favChanges) favorites updated" : "") + (errors.isEmpty ? "" : ", \(errors.count) errors")
+            status = "Synced \(done) new/changed, removed \(removed)" + (favChanges > 0 ? ", \(favChanges) updates from other devices" : "") + (errors.isEmpty ? "" : ", \(errors.count) errors")
             report(base, .done, status, force: true)
         } else {
             report(base, .cancelled, "Cancelled on iPhone", force: true)
@@ -230,6 +241,39 @@ final class SyncManager: ObservableObject {
         for d in dirs.sorted(by: { $0.path.count > $1.path.count }) {
             if let c = try? fm.contentsOfDirectory(atPath: d.path), c.filter({ $0 != ".DS_Store" }).isEmpty { try? fm.removeItem(at: d) }
         }
+    }
+
+    // MARK: peer sync with the Mac (see SyncStore)
+
+    private func pushChanges(base: URL, mac: String) async {
+        status = "Sending your plays and favorites…"
+        let st = model.db.sync
+        let cs = st.changes(since: st.peer(mac)?.pushedSeq ?? 0, includeYT: false, name: model.deviceName)
+        var req = URLRequest(url: base.appendingPathComponent("api/v2/changes"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONEncoder().encode(cs)
+        if let (_, resp) = try? await session.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200 {
+            st.notePeer(mac, name: lastServerName.isEmpty ? "Mac" : lastServerName, pushed: cs.seq)
+        } else {
+            errors.append("Couldn't send plays and favorites to the Mac")
+        }
+    }
+
+    /// Returns how many favorites/plays/playlist changes arrived.
+    private func pullChanges(base: URL, mac: String) async -> Int {
+        let st = model.db.sync
+        var c = URLComponents(url: base.appendingPathComponent("api/v2/changes"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "since", value: String(st.peer(mac)?.pulledSeq ?? 0)),
+                        URLQueryItem(name: "from", value: st.replicaID), URLQueryItem(name: "name", value: model.deviceName)]
+        guard let (data, resp) = try? await session.data(from: c.url!), (resp as? HTTPURLResponse)?.statusCode == 200,
+              let cs = try? JSONDecoder().decode(SyncStore.ChangeSet.self, from: data) else {
+            errors.append("Couldn't get changes from the Mac")
+            return 0
+        }
+        let res = await offMain { st.apply(cs) }
+        st.notePeer(mac, name: cs.name ?? "Mac", pulled: cs.seq)
+        return res.changed
     }
 
     func uploadStats(base: URL) async {

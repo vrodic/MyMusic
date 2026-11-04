@@ -68,18 +68,15 @@ final class WebPeer: ObservableObject {
     }
 
     func sync() async {
-        guard !isSyncing, var pull = request("api/peer/stats"), var push = request("api/peer/library") else { return }
+        guard !isSyncing, var push = request("api/peer/library") else { return }
         isSyncing = true
         defer { isSyncing = false }
         do {
-            // 1. pull web plays + favorites
-            pull.httpMethod = "GET"
-            let (data, resp) = try await session.data(for: pull)
-            try check(resp, data)
-            let web = try JSONDecoder().decode(StatsUpload.self, from: data)
-            try model.db.storeDeviceStats(web)
-            webDeviceName = web.deviceName
-            model.afterWebPull()
+            // 1. plays, favorites, users, playlists and the YouTube queue: the peer exchange
+            if let base = baseURL, let info = try? await fetchInfo(base), let id = info.replica {
+                await model.peers.exchange(base: base, token: token, peerID: id, name: info.name, kind: "web player")
+                webDeviceName = info.name
+            }
 
             // 2. duplicates removed on the web player (before pushing, or the push would re-add them)
             var removedHere = 0
@@ -101,13 +98,8 @@ final class WebPeer: ObservableObject {
                 }
             }
 
-            // 3. push library with Mac-side totals (excluding the web player's own plays)
-            let others = model.db.devicePlayTotals(excluding: web.deviceID)
-            let tracks = model.db.allTracks().map { t -> Track in
-                var t = t
-                t.playCount += others[t.relPath]?.plays ?? 0
-                return t
-            }
+            // 3. push song details (tags, lengths): the web player reads its stats from the exchange
+            let tracks = model.db.allTracks()
             let manifest = LibraryManifest(serverName: model.serverName, apiVersion: MyMusicService.apiVersion,
                                            generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: model.db.recentMerges())
             push.httpMethod = "POST"
@@ -118,7 +110,7 @@ final class WebPeer: ObservableObject {
             let r = (try? JSONSerialization.jsonObject(with: rdata) as? [String: Int]) ?? [:]
             lastResult = "\(r["tracks"] ?? tracks.count) songs · \(r["added"] ?? 0) added · \(r["removed"] ?? 0) removed"
                 + ((r["favoritesChanged"] ?? 0) > 0 ? " · \(r["favoritesChanged"]!) favorites" : "")
-                + " · \(web.entries.filter { $0.playCount > 0 }.count) songs played on the web"
+
                 + (removedHere > 0 ? " · \(removedHere) duplicates removed on the web" : "")
             lastSync = Date()
             lastError = nil
@@ -132,20 +124,48 @@ final class WebPeer: ObservableObject {
     // MARK: library backup on the web player (lets a new Mac start from this library)
 
     @AppStorage("web.lastBackupUpload") private var lastBackupUpload: Double = 0
+    @Published private(set) var isBackingUp = false
+    @Published private(set) var backupError: String?
+
+    /// When this Mac last sent its library backup to the web player.
+    var lastBackup: Date? { lastBackupUpload > 0 ? Date(timeIntervalSince1970: lastBackupUpload) : nil }
 
     private func uploadBackupIfDue() async {
-        guard Date().timeIntervalSince1970 - lastBackupUpload > 30 * 60, var req = request("api/peer/backup") else { return }
+        guard Date().timeIntervalSince1970 - lastBackupUpload > 30 * 60 else { return }
+        await backUpNow()
+    }
+
+    /// Upload a copy of this Mac's library to its own slot on the web player (a new Mac can start
+    /// from any Mac's copy).
+    func backUpNow() async {
+        guard !isBackingUp, var req = request("api/peer/backup") else { return }
+        isBackingUp = true
+        defer { isBackingUp = false }
+        var c = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)!
+        c.queryItems = [.init(name: "replica", value: model.db.sync.replicaID), .init(name: "name", value: model.serverName)]
+        req.url = c.url
         let path = FileManager.default.temporaryDirectory.appendingPathComponent("mymusic-backup-\(UUID().uuidString).sqlite").path
         defer { try? FileManager.default.removeItem(atPath: path) }
         let db = model.db
         db.saveSettingsForBackup()
         let ok = await offMain { (try? db.db.snapshot(to: path)) != nil }
-        guard ok, let data = FileManager.default.contents(atPath: path) else { return }
+        guard ok, let data = FileManager.default.contents(atPath: path) else { backupError = "Couldn't copy the database"; return }
         req.httpMethod = "POST"
         req.setValue("application/vnd.sqlite3", forHTTPHeaderField: "Content-Type")
-        if let (rdata, resp) = try? await session.upload(for: req, from: data), (try? check(resp, rdata)) != nil {
+        do {
+            let (rdata, resp) = try await session.upload(for: req, from: data)
+            try check(resp, rdata)
             lastBackupUpload = Date().timeIntervalSince1970
+            backupError = nil
+        } catch {
+            backupError = error.localizedDescription
         }
+    }
+
+    private func fetchInfo(_ base: URL) async throws -> WebPlayerInfo {
+        let (data, resp) = try await session.data(from: base.appending(path: "api/info"))
+        try check(resp, data)
+        return try JSONDecoder().decode(WebPlayerInfo.self, from: data)
     }
 
     private func check(_ resp: URLResponse, _ data: Data) throws {

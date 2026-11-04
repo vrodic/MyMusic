@@ -13,6 +13,7 @@ final class ServerBackend: @unchecked Sendable {
     var onStatsUploaded: (@Sendable () -> Void)?
     var onPresenceChanged: (@Sendable () -> Void)?
     var onProgress: (@Sendable (SyncProgress) -> Void)?
+    var onSyncApplied: (@Sendable (SyncStore.ApplyResult) -> Void)?
 
     // MARK: device presence + commands (long-poll)
     struct Presence { var name: String; var lastSeen: Date; var waiting: Int }
@@ -61,6 +62,23 @@ final class ServerBackend: @unchecked Sendable {
     }
     private var snapshot: (URL?, FolderSelection, Bool) { lock.withLock { (_root, _selection, _syncFavorites) } }
 
+    /// What an iPhone of `user` gets: that user's ticked folders, plus (if they chose so) their
+    /// favorites, plus the songs in their playlists.
+    func syncFilter(user: String) -> (Track) -> Bool {
+        let st = db.sync
+        let sel = st.setting(user: user, key: "syncSelection").flatMap { try? JSONDecoder().decode(FolderSelection.self, from: Data($0.utf8)) } ?? FolderSelection()
+        let favsOn = st.setting(user: user, key: "syncFavorites") == "1"
+        let playlistsOn = st.setting(user: user, key: "syncPlaylists") != "0"
+        let alias = st.aliases()
+        let favs = favsOn ? Set(st.favorites(user: user).filter { $0.value.0 }.keys) : []
+        let inPlaylists = playlistsOn ? Set(st.playlists(user: user).flatMap(\.items)) : []
+        return { t in
+            if sel.contains(relPath: t.relPath) { return true }
+            let k0 = SyncStore.key(t.relPath), k = alias[k0] ?? k0
+            return favs.contains(k) || inPlaylists.contains(k)
+        }
+    }
+
     /// A track goes to devices if its folder is ticked, or it's a favorite (Mac or any device) and "sync favorites" is on.
     func syncFilter() -> (Track) -> Bool {
         let (_, selection, favs) = snapshot
@@ -74,13 +92,15 @@ final class ServerBackend: @unchecked Sendable {
         case ("GET", "/api/info"):
             let all = db.allTracks()
             return .json(ServerInfo(name: name, apiVersion: MyMusicService.apiVersion, trackCount: all.count,
-                                    syncedTrackCount: all.filter(syncFilter()).count))
+                                    syncedTrackCount: all.filter(syncFilter()).count, replica: db.sync.replicaID))
         case ("GET", "/api/library"):
-            let tracks = db.allTracks().filter(syncFilter())
+            let filter = req.query["user"].map { syncFilter(user: $0) } ?? syncFilter()
+            let tracks = db.allTracks().filter(filter)
             return .json(LibraryManifest(serverName: name, apiVersion: MyMusicService.apiVersion,
                                          generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: db.recentMerges()))
         case ("GET", "/api/file"), ("HEAD", "/api/file"):
-            guard let root, let rel = req.query["path"], let t = db.track(relPath: rel), syncFilter()(t) else { return .notFound }
+            // any song in the library (other users' playlists and streaming need more than this Mac's selection)
+            guard let root, let rel = req.query["path"], db.track(relPath: rel) != nil else { return .notFound }
             // Only indexed paths get here; reject any ".." without touching the file system.
             guard !rel.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { return .notFound }
             return .file(root.appendingFile(rel))
@@ -97,6 +117,17 @@ final class ServerBackend: @unchecked Sendable {
         case ("GET", "/api/events"):
             guard let id = req.query["id"] else { return .badRequest("id required") }
             return .json(DeviceEvents(commands: waitForCommands(device: id, name: req.query["name"] ?? "iPhone")))
+        // MARK: peer sync (Macs, iPhones, the web player)
+        case ("GET", "/api/v2/changes"):
+            let since = Int(req.query["since"] ?? "0") ?? 0
+            if let from = req.query["from"] { db.sync.notePeer(from, name: req.query["name"] ?? "device") }
+            return .json(db.sync.changes(since: since, includeYT: req.query["yt"] == "1", name: name))
+        case ("POST", "/api/v2/changes"):
+            guard let cs = try? JSONDecoder().decode(SyncStore.ChangeSet.self, from: req.body) else { return .badRequest("bad json") }
+            let res = db.sync.apply(cs)
+            db.sync.notePeer(cs.replica, name: cs.name ?? "device")
+            if res.changed > 0 { onSyncApplied?(res) }
+            return .json(["seq": db.sync.currentSeq, "changed": res.changed])
         case ("GET", "/api/stats/devices"):
             // iPhones restore from these; the web player isn't an iPhone backup
             return .json(db.deviceBackups().filter { !$0.deviceID.hasPrefix("web-") })
@@ -114,8 +145,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var musicRoot: URL?
     /// Music root is on SMB/AFP/NFS: avoid optional file-system calls.
     @Published private(set) var rootIsRemote = false
-    @Published var selection: FolderSelection { didSet { saveSelection(); pushBackend() } }
-    @Published var syncFavorites: Bool { didSet { UserDefaults.standard.set(syncFavorites, forKey: "syncFavorites"); pushBackend() } }
+    // Sync choices belong to the current user (and replicate to the other Macs).
+    @Published var selection: FolderSelection { didSet { if !loadingUser { saveSelection() }; pushBackend() } }
+    @Published var syncFavorites: Bool { didSet { if !loadingUser { saveUserSetting("syncFavorites", syncFavorites ? "1" : "0") }; pushBackend() } }
+    @Published var syncPlaylists: Bool = true { didSet { if !loadingUser { saveUserSetting("syncPlaylists", syncPlaylists ? "1" : "0") } } }
+    @Published private(set) var users: [SyncStore.User] = []
+    @Published private(set) var currentUser = SyncStore.defaultUserID
+    @Published private(set) var playlists: [SyncStore.Playlist] = []
+    private var loadingUser = false
+    private(set) var peers: PeerSync!
+    /// For background work that needs the name without hopping to the main thread.
+    nonisolated(unsafe) var serverNameSnapshot = ""
     @Published private(set) var scanStatus = ""
     @Published private(set) var isScanning = false
     @Published private(set) var serverStatus = "Stopped"
@@ -142,6 +182,15 @@ final class AppModel: ObservableObject {
 
     init() {
         let db = try! LibraryDB(path: Self.supportDir.appendingPathComponent("library.sqlite").path, extraMigrations: LibraryDB.macMigrations)
+        db.currentUser = UserDefaults.standard.string(forKey: "currentUser") ?? SyncStore.defaultUserID
+        if !db.sync.flag("legacyMigrated") {
+            db.migrateLegacyStats(otherDevices: db.legacyDeviceCells(), aliases: db.legacyMerges())
+            // this Mac's sync choices become the default user's (they follow the user now)
+            if let sel = UserDefaults.standard.data(forKey: "syncSelection") {
+                db.sync.setSetting(user: SyncStore.defaultUserID, key: "syncSelection", value: String(decoding: sel, as: UTF8.self))
+            }
+            db.sync.setSetting(user: SyncStore.defaultUserID, key: "syncFavorites", value: UserDefaults.standard.bool(forKey: "syncFavorites") ? "1" : "0")
+        }
         self.db = db
         store = LibraryStore(db: db)
         let rootPath = UserDefaults.standard.string(forKey: "musicRoot")
@@ -184,15 +233,34 @@ final class AppModel: ObservableObject {
             }
         }
         server.onStateChange = { [weak self] s in Task { @MainActor in self?.serverStatus = s } }
-        player.onPlayCounted = { [weak self] t in self?.store.recordPlay(t) }
+        player.onPlayCounted = { [weak self] t in self?.store.recordPlay(t); self?.peers?.kick(after: 20) }
         player.onSkipped = { [weak self] t in self?.store.recordSkip(t) }
         devices = db.deviceBackups()
 
         yt.libraryProvider = { [weak self] in self?.store.tracks ?? [] }
+        yt.onSharedChange = { [weak self] in self?.peers?.kick(after: 2) }
+        if !db.sync.flag("ytPublished") {
+            // first run with peer sync: share the whole queue once
+            db.publishYT(db.ytItems().map(\.videoID), user: true, download: true, info: true)
+            db.sync.setFlag("ytPublished")
+        }
         startServer()
         checkRemote()
         yt.start()
         web = WebPeer(model: self)
+        currentUser = db.currentUser
+        serverNameSnapshot = serverName
+        if !db.sync.flag("defaultUserNamed") {
+            // give the default user a real name once, so every device shows the same one
+            let first = NSFullUserName().split(separator: " ").first.map(String.init) ?? "Me"
+            if (try? db.db.query("SELECT 1 FROM sync_users WHERE user_id = ?", [SyncStore.defaultUserID]))?.isEmpty ?? true {
+                db.sync.saveUser(id: SyncStore.defaultUserID, name: first)
+            }
+            db.sync.setFlag("defaultUserNamed")
+        }
+        loadUser()
+        peers = PeerSync(model: self)
+        backend.onSyncApplied = { [weak self] res in Task { @MainActor in self?.afterSyncApplied(res) } }
         if musicRoot != nil { Task { await rescan() } }
     }
 
@@ -235,7 +303,141 @@ final class AppModel: ObservableObject {
     var syncedTracks: [Track] { store.tracks.filter(backend.syncFilter()) }
 
     private func saveSelection() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(selection), forKey: "syncSelection")
+        let data = (try? JSONEncoder().encode(selection)) ?? Data()
+        UserDefaults.standard.set(data, forKey: "syncSelection")
+        saveUserSetting("syncSelection", String(decoding: data, as: UTF8.self))
+    }
+
+    private func saveUserSetting(_ key: String, _ value: String) {
+        db.sync.setSetting(user: currentUser, key: key, value: value)
+        peers?.kick()
+    }
+
+    // MARK: users
+
+    /// Load the current user's sync choices and playlists.
+    func loadUser() {
+        loadingUser = true
+        defer { loadingUser = false }
+        let st = db.sync
+        users = st.users()
+        if let json = st.setting(user: currentUser, key: "syncSelection"), let sel = try? JSONDecoder().decode(FolderSelection.self, from: Data(json.utf8)) {
+            selection = sel
+        } else if currentUser != SyncStore.defaultUserID {
+            selection = FolderSelection()
+        }
+        if let v = st.setting(user: currentUser, key: "syncFavorites") { syncFavorites = v == "1" }
+        syncPlaylists = st.setting(user: currentUser, key: "syncPlaylists") != "0"
+        playlists = st.playlists(user: currentUser)
+    }
+
+    func switchUser(_ id: String) {
+        guard id != currentUser else { return }
+        currentUser = id
+        db.currentUser = id
+        UserDefaults.standard.set(id, forKey: "currentUser")
+        loadUser()
+        Task {
+            await offMain { [db] in db.refreshCache() }
+            await store.reloadNow()
+            player.refreshAll(store.track)
+        }
+    }
+
+    @discardableResult
+    func addUser(_ name: String) -> String {
+        let id = UUID().uuidString
+        db.sync.saveUser(id: id, name: name)
+        users = db.sync.users()
+        peers?.kick()
+        return id
+    }
+
+    func renameUser(_ id: String, _ name: String) {
+        db.sync.saveUser(id: id, name: name)
+        users = db.sync.users()
+        peers?.kick()
+    }
+
+    func deleteUser(_ id: String) {
+        guard id != SyncStore.defaultUserID else { return }
+        let name = users.first { $0.id == id }?.name ?? ""
+        db.sync.saveUser(id: id, name: name, deleted: true)
+        if currentUser == id { switchUser(SyncStore.defaultUserID) }
+        users = db.sync.users()
+        peers?.kick()
+    }
+
+    // MARK: playlists (per user)
+
+    @discardableResult
+    func createPlaylist(_ name: String, with tracks: [Track] = []) -> String {
+        let p = SyncStore.Playlist(id: UUID().uuidString, userID: currentUser, name: name, items: tracks.map(\.relPath))
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+        return p.id
+    }
+
+    func addToPlaylist(_ id: String, _ tracks: [Track]) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        let have = Set(p.items)
+        p.items += tracks.map { SyncStore.key($0.relPath) }.filter { !have.contains($0) }
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+    }
+
+    func removeFromPlaylist(_ id: String, _ tracks: [Track]) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        let drop = Set(tracks.map { SyncStore.key($0.relPath) })
+        p.items.removeAll { drop.contains($0) }
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+    }
+
+    func movePlaylistItem(_ id: String, _ track: Track, toTop: Bool) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        let k = SyncStore.key(track.relPath)
+        guard let i = p.items.firstIndex(of: k) else { return }
+        p.items.remove(at: i)
+        if toTop { p.items.insert(k, at: 0) } else { p.items.append(k) }
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+    }
+
+    func renamePlaylist(_ id: String, _ name: String) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        p.name = name
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+    }
+
+    func deletePlaylist(_ id: String) {
+        guard var p = playlists.first(where: { $0.id == id }) else { return }
+        p.deleted = true
+        db.sync.savePlaylist(p)
+        playlistsChanged()
+    }
+
+    /// The songs of a playlist, in order (songs not in this library are skipped).
+    func tracks(in p: SyncStore.Playlist) -> [Track] {
+        let byKey = Dictionary(store.tracks.map { (SyncStore.key($0.relPath), $0) }, uniquingKeysWith: { a, _ in a })
+        return p.items.compactMap { byKey[$0] }
+    }
+
+    private func playlistsChanged() {
+        playlists = db.sync.playlists(user: currentUser)
+        peers?.kick()
+    }
+
+    /// Changes arrived from another device: refresh what this Mac shows.
+    func afterSyncApplied(_ res: SyncStore.ApplyResult) {
+        loadUser()
+        yt.applySync(res.ytChanged)
+        Task {
+            await offMain { [db] in db.refreshCache() }
+            await store.reloadNow()
+            player.refreshAll(store.track)
+        }
     }
 
     func url(for t: Track) -> URL { (musicRoot ?? URL(fileURLWithPath: "/", isDirectory: true)).appendingFile(t.relPath) }
@@ -272,6 +474,8 @@ final class AppModel: ObservableObject {
         selection = (UserDefaults.standard.data(forKey: "syncSelection")).flatMap { try? JSONDecoder().decode(FolderSelection.self, from: $0) } ?? FolderSelection()
         syncFavorites = UserDefaults.standard.bool(forKey: "syncFavorites")
         devices = db.deviceBackups()
+        db.refreshCache()
+        loadUser()
         yt.reload()
         store.reload()
     }
@@ -395,6 +599,7 @@ final class AppModel: ObservableObject {
     }
 
     func toggleFavorite(_ t: Track) {
+        defer { peers?.kick() }
         defer { web?.syncSoon() }
         let u = store.toggleFavorite(t)
         player.refresh(u)

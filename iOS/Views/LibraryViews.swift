@@ -21,6 +21,7 @@ struct LibraryHome: View {
                 NavigationLink { TrackListView(title: "Recently Added", tracks: store.recentlyAdded) } label: { Label("Recently Added", systemImage: "plus.circle") }
                 NavigationLink { TrackListView(title: "YouTube", tracks: store.tracks.filter { $0.source == .youtube }) } label: { Label("YouTube Likes", systemImage: "play.rectangle") }
             }
+            PlaylistsSection()
             ServerSection()
             Section {
                 let d = store.tracks.reduce(0.0) { $0 + ($1.duration ?? 0) }
@@ -173,6 +174,7 @@ struct TrackMenu: View {
         Button { player.playNext(track) } label: { Label("Play Next", systemImage: "text.insert") }
         Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
         Button { model.toggleFavorite(track) } label: { Label(track.favorite ? "Unfavorite" : "Favorite", systemImage: track.favorite ? "heart.slash" : "heart") }
+        AddToPlaylistMenu(tracks: [track])
         ShareLink(item: model.url(for: track)) { Label("Share / Open In…", systemImage: "square.and.arrow.up") }
         Section("\(track.playCount) plays · \(track.fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: track.size, countStyle: .file))") {
             Button(role: .destructive) { model.deleteFromDevice([track]) } label: { Label("Remove from iPhone", systemImage: "trash") }

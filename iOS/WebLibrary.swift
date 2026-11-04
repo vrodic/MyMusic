@@ -46,7 +46,9 @@ final class WebLibrary: ObservableObject {
         do {
             let (idata, _) = try await session.data(from: base.appending(path: "api/info"))
             info = try JSONDecoder().decode(WebPlayerInfo.self, from: idata)
-            let (tdata, _) = try await session.data(from: base.appending(path: "api/tracks"))
+            var tc = URLComponents(url: base.appending(path: "api/tracks"), resolvingAgainstBaseURL: false)!
+            tc.queryItems = [URLQueryItem(name: "user", value: model.db.currentUser)]
+            let (tdata, _) = try await session.data(from: tc.url!)
             let list = try JSONDecoder().decode([ServerTrack].self, from: tdata).map(\.track)
             serverTracks = list.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         } catch {
@@ -75,11 +77,11 @@ final class WebLibrary: ObservableObject {
     }
 
     /// Plays and favorites of streamed songs are recorded on the web player (→ the Mac on its next sync).
-    func reportPlay(_ t: Track) { post("api/played", ["path": t.relPath]) }
-    func reportSkip(_ t: Track) { post("api/skipped", ["path": t.relPath]) }
+    func reportPlay(_ t: Track) { post("api/played", ["path": t.relPath, "user": model.db.currentUser]) }
+    func reportSkip(_ t: Track) { post("api/skipped", ["path": t.relPath, "user": model.db.currentUser]) }
 
     func setFavorite(_ t: Track, _ fav: Bool) {
-        post("api/favorite", ["paths": [t.relPath], "favorite": fav])
+        post("api/favorite", ["paths": [t.relPath], "favorite": fav, "user": model.db.currentUser])
         if let i = serverTracks.firstIndex(where: { $0.relPath == t.relPath }) { serverTracks[i].favorite = fav }
     }
 

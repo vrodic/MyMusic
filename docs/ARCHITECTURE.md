@@ -44,3 +44,26 @@ Two native SwiftUI apps that share one source folder (`Shared/`):
 
 ## Data safety
 See [CERTIFICATES.md](CERTIFICATES.md). Short version: every sync backs up the iPhone's play counts and favorites to the Mac database; after a reinstall *Settings → Restore stats from Mac* puts them back and the music re-syncs.
+
+## Peer sync (users, play counts, favorites, playlists, YouTube queue)
+Every device — each Mac, each iPhone, the web player — keeps a full copy and works offline; when two
+meet they swap only what changed since last time (`GET/POST /api/v2/changes`, delta by each device's
+own sequence number, gossiped onward). `Shared/SyncStore.swift` (Swift) and `web/sync.go` (Go) hold the
+same tables and merge rules, all conflict-free:
+
+| data | rule |
+|---|---|
+| play / skip counts | one counter cell per (user, song, device); a device only raises its own; merge = max per cell; total = sum |
+| favorites, users, playlists, per-user settings | newest change wins (ties: device id) |
+| removed duplicates | alias old → kept song; stats follow it everywhere |
+| YouTube queue (Macs + web relay) | user fields and download fields newest-wins separately; "downloaded" sticks; download claims (newest wins) so two Macs don't fetch one song |
+
+Songs are keyed by their path in Unicode NFC (Macs see decomposed names over SMB, Linux composed).
+Macs find each other over Bonjour (`_mymusic._tcp`) and exchange every minute and soon after changes;
+the web player relays between Macs that are never on together; iPhones exchange with their Mac on
+every sync. Each device has a current user (Mac: toolbar; iPhone: Settings; web: header); an iPhone
+gets that user's ticked folders, favorites (if chosen) and playlist songs. The `tracks` table keeps a
+copy of the current user's totals so lists stay simple and fast.
+
+Each Mac also uploads a copy of its library to its own slot on the web player every 30 minutes (or
+**Back Up Now**); a new Mac picks one to start from, or none and just syncs with the peers.

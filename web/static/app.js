@@ -8,7 +8,9 @@ const state = {
   view: 'songs', folder: '', pick: null, query: '',
   queue: [], index: -1, original: [], shuffle: false, repeat: 'off', counted: false,
   shown: [], rendered: 0,
+  user: 'default', users: [], playlists: [], playlist: null,
 };
+const keyOf = (p) => p.normalize('NFC');   // songs are identified by their path in NFC on every device
 
 // ---------- search: case- and accent-insensitive, all words must match (same rules as the apps)
 const EXTRA = { 'đ': 'dj', 'ð': 'd', 'ł': 'l', 'ø': 'o', 'æ': 'ae', 'œ': 'oe', 'ß': 'ss', 'þ': 'th', 'ı': 'i' };
@@ -39,7 +41,7 @@ const load = (k, d) => { try { const v = localStorage.getItem('mm.' + k); return
 
 // ---------- library
 async function loadLibrary() {
-  const res = await fetch('api/tracks');
+  const res = await fetch('api/tracks?user=' + encodeURIComponent(state.user));
   const list = await res.json();
   list.sort((a, b) => cmp(a.title, b.title));
   state.tracks = list;
@@ -91,7 +93,7 @@ const filterTracks = (list, q) => (q.empty ? list : list.filter((t) => q.test(st
 const VIEWS = {
   songs: 'Songs', folders: 'Folders', artists: 'Artists', albums: 'Albums', favorites: 'Favorites',
   mostPlayed: 'Most Played', recentlyPlayed: 'Recently Played', recentlyAdded: 'Recently Added', youtube: 'YouTube Likes',
-  duplicates: 'Duplicates',
+  duplicates: 'Duplicates', playlist: 'Playlist',
 };
 
 function viewTracks(q) {
@@ -105,6 +107,12 @@ function viewTracks(q) {
     case 'youtube': return filterTracks(T.filter((t) => t.source === 'youtube'), q);
     case 'artists': return state.pick ? T.filter((t) => artistOf(t) === state.pick || t.albumArtist === state.pick).sort(albumOrder) : [];
     case 'albums': return state.pick ? T.filter((t) => `${albumOf(t)}\u0001${t.albumArtist || artistOf(t)}` === state.pick).sort(albumOrder) : [];
+    case 'playlist': {
+      const p = state.playlists.find((x) => x.id === state.playlist);
+      if (!p) return [];
+      const byKey = new Map(T.map((t) => [keyOf(t.relPath), t]));
+      return filterTracks(p.i.map((k) => byKey.get(k)).filter(Boolean), q);
+    }
   }
   return [];
 }
@@ -145,7 +153,9 @@ function render() {
     return;
   } else {
     const back = state.pick ? `<a data-unpick>${VIEWS[state.view]}</a><span class="sep">›</span>` : '';
-    const title = state.pick ? esc(state.pick.split('\u0001')[0]) : VIEWS[state.view];
+    const pl = state.view === 'playlist' ? state.playlists.find((x) => x.id === state.playlist) : null;
+    const title = pl ? `${esc(pl.n)} <button class="mini" data-plrename title="Rename">✎</button><button class="mini" data-pldelete title="Delete">🗑</button>`
+      : state.pick ? esc(state.pick.split('\u0001')[0]) : VIEWS[state.view];
     crumbs.innerHTML = back + title;
     tracks = viewTracks(q);
     if (!tracks.length) { empty.hidden = false; empty.textContent = q.empty ? 'Nothing here yet' : `Nothing matches “${state.query}”`; }
@@ -187,7 +197,7 @@ function renderRows(reset) {
   if (reset) {
     state.rendered = 0;
     list.innerHTML = state.shown.length ? `<div class="row head"><button class="heart" data-favall title="Favorite every song in this list">♥</button>
-      <div>Title</div><div class="artist">Artist</div><div class="album">Album</div><div class="num">Time</div><div class="num plays">Plays</div></div>` : '';
+      <div>Title</div><div class="artist">Artist</div><div class="album">Album</div><div class="num">Time</div><div class="num plays">Plays</div><div></div></div>` : '';
   }
   const cur = state.queue[state.index]?.relPath;
   const slice = state.shown.slice(state.rendered, state.rendered + PAGE);
@@ -195,7 +205,8 @@ function renderRows(reset) {
       <button class="heart${t.favorite ? ' on' : ''}" data-fav="${state.rendered + i}">${t.favorite ? '♥' : '♡'}</button>
       <div class="cell title">${esc(t.title)}<small>${esc(artistOf(t))}</small></div>
       <div class="cell artist">${esc(artistOf(t))}</div><div class="cell album">${esc(albumOf(t))}</div>
-      <div class="num">${fmt(t.duration)}</div><div class="num plays">${t.playCount || ''}</div></div>`).join(''));
+      <div class="num">${fmt(t.duration)}</div><div class="num plays">${t.playCount || ''}</div>
+      <button class="more" data-more="${state.rendered + i}" title="Add to playlist…">${state.view === 'playlist' ? '✕' : '＋'}</button></div>`).join(''));
   state.rendered += slice.length;
 }
 // load more rows as you scroll
@@ -208,6 +219,90 @@ function refreshRow(t) {
   if (btn) { btn.classList.toggle('on', t.favorite); btn.textContent = t.favorite ? '♥' : '♡'; }
   updateNowPlaying();
 }
+
+// ---------- users & playlists (shared with the Macs and iPhones through peer sync)
+async function loadUsers() {
+  try {
+    state.users = await (await fetch('api/users')).json();
+    if (!state.users.some((u) => u.id === state.user)) state.user = 'default';
+    $('userSel').innerHTML = state.users.map((u) => `<option value="${esc(u.id)}"${u.id === state.user ? ' selected' : ''}>${esc(u.name)}</option>`).join('');
+  } catch (_) {}
+}
+async function loadPlaylists() {
+  try { state.playlists = await (await fetch('api/playlists?user=' + encodeURIComponent(state.user))).json(); } catch (_) { state.playlists = []; }
+  $('playlistNav').innerHTML = state.playlists.map((p) => `<a data-pl="${esc(p.id)}" class="${state.view === 'playlist' && state.playlist === p.id ? 'active' : ''}">${esc(p.n)} <span class="muted">${p.i.length}</span></a>`).join('')
+    || '<div class="nav-status">No playlists yet</div>';
+}
+async function savePlaylist(p) {
+  const saved = await (await api('api/playlists', p)).json();
+  await loadPlaylists();
+  return saved;
+}
+async function addToPlaylist(id, tracks) {
+  const p = state.playlists.find((x) => x.id === id);
+  if (!p) return;
+  const have = new Set(p.i);
+  const items = p.i.concat(tracks.map((t) => keyOf(t.relPath)).filter((k) => !have.has(k)));
+  await savePlaylist({ id: p.id, u: state.user, n: p.n, i: items, d: false });
+}
+async function newPlaylist(tracks = []) {
+  const name = prompt('Playlist name');
+  if (!name) return null;
+  const p = await savePlaylist({ u: state.user, n: name, i: tracks.map((t) => keyOf(t.relPath)), d: false });
+  return p;
+}
+function showMenu(x, y, items) {
+  const m = $('menu');
+  m.innerHTML = items.map((it, i) => it === '-' ? '<div class="sep"></div>' : `<button data-mi="${i}">${esc(it.label)}</button>`).join('');
+  m.hidden = false;
+  m.style.left = Math.min(x, innerWidth - 220) + 'px'; m.style.top = Math.min(y, innerHeight - 40 * items.length) + 'px';
+  m.onclick = (e) => { const b = e.target.closest('[data-mi]'); if (b) { m.hidden = true; items[+b.dataset.mi].run(); } };
+}
+document.addEventListener('click', (e) => { if (!e.target.closest('#menu') && !e.target.closest('[data-more]')) $('menu').hidden = true; });
+$('userSel').onchange = async () => {
+  state.user = $('userSel').value; save('user', state.user);
+  if (state.view === 'playlist') state.view = 'songs';
+  await loadPlaylists(); await loadLibrary();
+};
+$('newPlaylist').onclick = async () => { const p = await newPlaylist(); if (p) { state.view = 'playlist'; state.playlist = p.id; render(); } };
+$('playlistNav').addEventListener('click', (e) => {
+  const a = e.target.closest('[data-pl]');
+  if (!a) return;
+  state.view = 'playlist'; state.playlist = a.dataset.pl; state.pick = null; state.query = ''; $('search').value = '';
+  $('nav').classList.remove('open'); $('main').scrollTop = 0; loadPlaylists(); render();
+});
+$('main').addEventListener('click', async (e) => {
+  const more = e.target.closest('[data-more]');
+  if (more) {
+    e.stopPropagation();
+    const t = state.shown[+more.dataset.more];
+    if (state.view === 'playlist') {
+      const p = state.playlists.find((x) => x.id === state.playlist);
+      const k = keyOf(t.relPath);
+      await savePlaylist({ id: p.id, u: state.user, n: p.n, i: p.i.filter((x) => x !== k), d: false });
+      render(); return;
+    }
+    const r = more.getBoundingClientRect();
+    showMenu(r.left - 180, r.bottom + 4, [
+      ...state.playlists.map((p) => ({ label: 'Add to ' + p.n, run: () => addToPlaylist(p.id, [t]) })),
+      ...(state.playlists.length ? ['-'] : []),
+      { label: 'New playlist with this song…', run: () => newPlaylist([t]) },
+    ]);
+    return;
+  }
+  if (e.target.closest('[data-plrename]')) {
+    const p = state.playlists.find((x) => x.id === state.playlist);
+    const name = prompt('Rename playlist', p.n);
+    if (name) { await savePlaylist({ ...p, n: name, d: false }); render(); }
+    return;
+  }
+  if (e.target.closest('[data-pldelete]')) {
+    const p = state.playlists.find((x) => x.id === state.playlist);
+    if (confirm(`Delete the playlist “${p.n}”? The songs stay in the library.`)) {
+      await savePlaylist({ ...p, d: true }); state.view = 'songs'; render();
+    }
+  }
+}, true);
 
 // ---------- duplicates (found and removed on the server; the Mac and iPhone follow on their next sync)
 const dup = { groups: null, scanning: false, msg: '' };
@@ -288,7 +383,7 @@ document.addEventListener('click', (e) => {
 async function setFavorite(list, fav) {
   list.forEach((t) => { t.favorite = fav; });
   list.forEach(refreshRow);
-  await api('api/favorite', { paths: list.map((t) => t.relPath), favorite: fav });
+  await api('api/favorite', { paths: list.map((t) => t.relPath), favorite: fav, user: state.user });
 }
 
 // ---------- player
@@ -320,7 +415,7 @@ function loadCurrent(autoplay) {
 function next(manual = true) {
   if (!state.queue.length) return;
   const cur = state.queue[state.index];
-  if (manual && !state.counted && audio.currentTime > 0 && cur) api('api/skipped', { path: cur.relPath });
+  if (manual && !state.counted && audio.currentTime > 0 && cur) api('api/skipped', { path: cur.relPath, user: state.user });
   if (state.index + 1 < state.queue.length) state.index++;
   else if (state.repeat === 'all') state.index = 0;
   else { audio.pause(); audio.currentTime = 0; return; }
@@ -335,7 +430,7 @@ function countPlay() {
   if (!t || state.counted) return;
   state.counted = true;
   t.playCount = (t.playCount || 0) + 1; t.lastPlayed = Date.now() / 1000;
-  api('api/played', { path: t.relPath });
+  api('api/played', { path: t.relPath, user: state.user });
 }
 
 function updateNowPlaying() {
@@ -452,12 +547,15 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- start
 state.view = load('view', 'songs');
+if (state.view === 'playlist') state.view = 'songs';
+state.user = load('user', 'default');
 state.shuffle = load('shuffle', false); $('shuffleBtn').classList.toggle('on', state.shuffle);
 state.repeat = load('repeat', 'off'); $('repeatBtn').classList.toggle('on', state.repeat !== 'off');
 if (state.repeat === 'one') $('repeatBtn').textContent = '↻¹';
 audio.volume = load('volume', 1); $('vol').value = audio.volume;
 updateNowPlaying();
+loadUsers().then(loadPlaylists);
 loadLibrary().catch((e) => { $('empty').hidden = false; $('empty').textContent = 'Could not load the library: ' + e; });
-setInterval(loadInfo, 60000);
+setInterval(() => { loadInfo(); loadUsers(); loadPlaylists(); }, 60000);
 // pick up Mac syncs (new songs, play counts, favorites) every few minutes while open
 setInterval(() => { if (document.visibilityState === 'visible' && audio.paused) loadLibrary(); }, 5 * 60000);

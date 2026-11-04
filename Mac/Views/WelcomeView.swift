@@ -6,6 +6,7 @@ struct WelcomeView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var setup = WebSetup()
     @State private var tokens: [String: String] = [:]
+    @State private var chosen: [String: String] = [:]   // candidate → backup replica ("" newest, "none")
 
     var body: some View {
         ScrollView {
@@ -53,6 +54,19 @@ struct WelcomeView: View {
             }
             if c.info.tokenRequired == true {
                 SecureField("Token (MYMUSIC_TOKEN on \(c.info.name))", text: Binding(get: { tokens[c.id] ?? "" }, set: { tokens[c.id] = $0 }))
+                    .onSubmit { Task { await setup.loadBackups(c, token: tokens[c.id] ?? "") } }
+            }
+            if let list = setup.backups[c.id] {
+                Picker("Start from", selection: Binding(get: { chosen[c.id] ?? "" }, set: { chosen[c.id] = $0 })) {
+                    Text("Newest backup").tag("")
+                    ForEach(list) { b in
+                        Text("\(b.name.isEmpty ? "A Mac" : b.name) · \(relative(b.at) ?? b.at) · \(ByteCountFormatter.string(fromByteCount: b.size, countStyle: .file))").tag(b.replica)
+                    }
+                    Text("No backup – just sync with the other devices").tag("none")
+                }
+                .help("Several Macs back up here, each in its own slot. Favorites, plays and playlists also arrive from the other devices either way.")
+            } else if c.info.tokenRequired != true || !(tokens[c.id] ?? "").isEmpty {
+                Button("Show Backups") { Task { await setup.loadBackups(c, token: tokens[c.id] ?? "") } }.buttonStyle(.link)
             }
             Text(c.info.macBackupAt == nil
                  ? "Connects to the music share and scans it. Plays and favorites from the web player carry over; a full library (play counts, iPhone backups, YouTube queue) needs the main Mac to sync with the web player once."
@@ -67,7 +81,8 @@ struct WelcomeView: View {
                 }
                 Spacer()
                 Button("Set Up from \(c.info.name)") {
-                    Task { await setup.setUp(c, token: tokens[c.id] ?? "", model: model) }
+                    let pick = chosen[c.id] ?? ""
+                    Task { await setup.setUp(c, token: tokens[c.id] ?? "", backup: pick == "none" ? nil : pick, model: model) }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(setup.isRunning || (c.info.tokenRequired == true && (tokens[c.id] ?? "").isEmpty))

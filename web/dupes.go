@@ -304,6 +304,7 @@ func (s *server) removeDuplicates(plans []RemovePlan) (removed int, failed []str
 				failed = append(failed, rel+": "+err.Error())
 				continue
 			}
+			_ = s.db.SyncAddAlias(rel, p.Keep, s.replica) // every peer folds its stats into the kept song
 			if err := s.db.RecordRemoval(rel, p.Keep); err != nil {
 				failed = append(failed, rel+": moved, but updating the library failed: "+err.Error())
 				continue

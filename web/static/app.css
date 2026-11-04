@@ -118,3 +118,14 @@ main { position: fixed; top: var(--top-h); bottom: var(--player-h); left: var(--
 .dup-row .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .dup-row .meta { font-size: 12px; color: var(--muted); }
 .btn.danger { border-color: #e5484d; color: #e5484d; }
+
+#userSel { height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); padding: 0 8px; }
+.mini { border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 14px; padding: 0 4px; float: right; }
+.row { grid-template-columns: 28px minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 52px 44px 26px; }
+.row .more { border: 0; background: none; cursor: pointer; color: var(--muted); font-size: 16px; padding: 0; }
+.row .more:hover { color: var(--accent); }
+.menu { position: fixed; z-index: 50; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.25); padding: 4px; min-width: 200px; }
+.menu button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.menu button:hover { background: var(--accent-soft); }
+.menu .sep { height: 1px; background: var(--line); margin: 4px 0; }
+@media (max-width: 760px) { .row { grid-template-columns: 26px minmax(0, 1fr) 46px 24px; } }

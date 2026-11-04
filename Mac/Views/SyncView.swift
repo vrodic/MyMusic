@@ -18,6 +18,10 @@ struct SyncView: View {
                     Button("Select All") { model.selection = FolderSelection(paths: [""]) }
                     Button("Select None") { model.selection = FolderSelection() }
                 }
+                Text("For \(model.users.first { $0.id == model.currentUser }?.name ?? "you"); each user has their own (switch in the toolbar).")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.syncPlaylists) { Label("Also sync my playlists", systemImage: "music.note.list") }
+                    .toggleStyle(.switch)
                 Toggle(isOn: $model.syncFavorites) {
                     VStack(alignment: .leading, spacing: 1) {
                         Label("Also sync all favorites", systemImage: "heart.fill")
@@ -74,6 +78,7 @@ struct SyncView: View {
                     Text("An iPhone shows up here while the MyMusic app is open (or playing in the background).")
                 }
                 WebPeerSection()
+                PeersSection()
                 Section("Devices (stats backups)") {
                     if model.devices.isEmpty { Text("No device has synced yet.").foregroundStyle(.secondary) }
                     ForEach(model.devices) { d in
@@ -250,9 +255,42 @@ struct WebPeerSection: View {
                     if let u = web.baseURL { Button("Open") { NSWorkspace.shared.open(u) } }
                 }
                 if let r = web.lastResult { Text(r).font(.caption).foregroundStyle(.secondary) }
+                HStack {
+                    if web.isBackingUp { ProgressView().controlSize(.small); Text("Backing up…").foregroundStyle(.secondary) }
+                    else if let e = web.backupError { Label(e, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                    else {
+                        Text(web.lastBackup.map { "Library backup sent \($0.formatted(.relative(presentation: .named)))" } ?? "No library backup sent yet")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Back Up Now") { Task { await web.backUpNow() } }.disabled(web.isBackingUp)
+                }
+                .help("A copy of this Mac's library (and sync settings) on the web player, in this Mac's own slot. Sent every 30 minutes; a new Mac can start from it.")
             }
         } header: { Text("Web player") } footer: {
             Text("Runs on your music server (see web/README.md). Gets your library, play counts and favorites every few minutes, and sends back what you play and favorite in the browser.")
+        }
+    }
+}
+
+/// Other MyMusic devices this Mac exchanges plays, favorites, playlists and the YouTube queue with.
+struct PeersSection: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let peers = model.db.sync.peers()
+        Section {
+            if peers.isEmpty { Text("No other device has synced with this Mac yet.").foregroundStyle(.secondary) }
+            ForEach(peers) { p in
+                LabeledContent(p.name, value: p.lastSync.map { Date(timeIntervalSince1970: $0).formatted(.relative(presentation: .named)) } ?? "never")
+            }
+            HStack {
+                Text("This Mac: \(model.db.sync.replicaID.prefix(8))…").font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Sync Now") { Task { await model.peers.syncAll() } }
+            }
+        } header: { Text("Peers") } footer: {
+            Text("Every Mac running MyMusic on this network, the web player and your iPhones keep the same favorites, play counts, playlists and YouTube queue. Each works on its own and catches up when they meet.")
         }
     }
 }

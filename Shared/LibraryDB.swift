@@ -3,6 +3,9 @@ import Foundation
 /// The `tracks` table shared by both apps. Platform specific tables are added via `extraMigrations`.
 final class LibraryDB: @unchecked Sendable {
     let db: SQLiteDB
+    let sync: SyncStore
+    /// Whose plays, favorites and playlists this device shows and records.
+    var currentUser = SyncStore.defaultUserID
 
     static let baseMigrations = [
         """
@@ -37,6 +40,8 @@ final class LibraryDB: @unchecked Sendable {
         db = try SQLiteDB(path: path)
         migrations = Self.baseMigrations + extraMigrations
         try db.migrate(migrations)
+        try db.execute(SyncStore.migration)   // idempotent (IF NOT EXISTS)
+        sync = SyncStore(db: db)
     }
 
     /// Replace everything with a database copy (e.g. restoring a Mac from the web player),
@@ -44,6 +49,10 @@ final class LibraryDB: @unchecked Sendable {
     func restore(from path: String) throws {
         try db.restore(from: path)
         try db.migrate(migrations)
+        try db.execute(SyncStore.migration)
+        // the backup came from another device: write our own plays under a new id
+        sync.setReplicaID(UUID().uuidString)
+        try? db.execute("DELETE FROM sync_peers")
     }
 
     // MARK: reading
@@ -114,22 +123,70 @@ final class LibraryDB: @unchecked Sendable {
         }
     }
 
+    // MARK: stats & favorites (stored in the replicated SyncStore, per user; the tracks table
+    // keeps a copy of the current user's numbers so lists and sorting stay simple and fast)
+
     func recordPlay(_ relPath: String, at date: Date = Date()) {
-        try? db.execute("UPDATE tracks SET play_count = play_count + 1, last_played = ? WHERE rel_path = ?",
-                        [date.timeIntervalSince1970, relPath])
+        sync.recordPlay(user: currentUser, relPath: relPath, at: date.timeIntervalSince1970)
+        refreshCache([relPath])
     }
 
     func recordSkip(_ relPath: String) {
-        try? db.execute("UPDATE tracks SET skip_count = skip_count + 1 WHERE rel_path = ?", [relPath])
+        sync.recordSkip(user: currentUser, relPath: relPath)
+        refreshCache([relPath])
     }
 
     func setFavorite(_ relPath: String, _ fav: Bool) {
-        try? db.execute("UPDATE tracks SET favorite = ?, favorite_at = ? WHERE rel_path = ?", [fav, Date().timeIntervalSince1970, relPath])
+        sync.setFavorite(user: currentUser, relPath: relPath, fav)
+        refreshCache([relPath])
     }
 
     func setFavorite(_ relPaths: [String], _ fav: Bool) {
-        let now = Date().timeIntervalSince1970
-        try? db.transaction { for p in relPaths { try db.execute("UPDATE tracks SET favorite = ?, favorite_at = ? WHERE rel_path = ?", [fav, now, p]) } }
+        let at = SyncStore.now()
+        try? db.transaction { for p in relPaths { sync.setFavorite(user: currentUser, relPath: p, fav, at: at) } }
+        refreshCache(relPaths)
+    }
+
+    /// Copy the current user's totals (all devices, duplicates folded in) into the tracks table.
+    func refreshCache(_ relPaths: [String]? = nil) {
+        let totals = sync.totals(user: currentUser), favs = sync.favorites(user: currentUser), alias = sync.aliases()
+        let paths = relPaths ?? ((try? db.query("SELECT rel_path FROM tracks")) ?? []).compactMap { $0.string("rel_path") }
+        try? db.transaction {
+            for p in paths {
+                let k0 = SyncStore.key(p), k = alias[k0] ?? k0
+                let t = totals[k], f = favs[k]
+                try db.execute("UPDATE tracks SET play_count = ?, skip_count = ?, last_played = ?, favorite = ?, favorite_at = ? WHERE rel_path = ?",
+                               [t?.plays ?? 0, t?.skips ?? 0, t?.lastPlayed, f?.0 ?? false, f.map { $0.1 > 0 ? $0.1 : nil } ?? nil, p])
+            }
+        }
+    }
+
+    /// One-time move of pre-sync data (this device's counts and favorites on the tracks table,
+    /// plus whatever the app passes: other devices' backed-up counts, duplicate merges) into the
+    /// replicated store, under the default user.
+    /// `historyReplica`: the counter cell this device's existing counts go into (an iPhone uses
+    /// "legacy-<its name>", matching how the Mac files its old backups, so they don't add up twice).
+    func migrateLegacyStats(replica: String? = nil, historyReplica: String? = nil, otherDevices: [SyncStore.PlayCell] = [], aliases: [(String, String)] = []) {
+        guard !sync.flag("legacyMigrated") else { return }
+        if let replica { sync.setReplicaID(replica) }
+        let me = historyReplica ?? sync.replicaID, u = SyncStore.defaultUserID
+        let rows = (try? db.query("SELECT rel_path, play_count, skip_count, last_played, favorite, favorite_at FROM tracks WHERE play_count > 0 OR skip_count > 0 OR favorite = 1 OR favorite_at IS NOT NULL")) ?? []
+        try? db.transaction {
+            for r in rows {
+                let k = SyncStore.key(r.string("rel_path") ?? "")
+                if (r.int("play_count") ?? 0) > 0 || (r.int("skip_count") ?? 0) > 0 {
+                    sync.mergePlay(.init(u: u, k: k, r: me, p: r.int("play_count") ?? 0, s: r.int("skip_count") ?? 0, l: r.double("last_played")))
+                }
+                if r.bool("favorite") || r.double("favorite_at") != nil {
+                    // hearts from before timestamps existed get a tiny time, so any real change wins
+                    sync.mergeFavorite(.init(u: u, k: k, f: r.bool("favorite"), t: r.double("favorite_at") ?? 1, b: me))
+                }
+            }
+            for c in otherDevices { sync.mergePlay(c) }
+            for (o, k) in aliases { sync.mergeAlias(.init(o: SyncStore.key(o), k: SyncStore.key(k), t: 1, b: me)) }
+        }
+        sync.setFlag("legacyMigrated")
+        refreshCache()
     }
 
     func statEntries() -> [PlayStatEntry] {
@@ -140,51 +197,30 @@ final class LibraryDB: @unchecked Sendable {
                                         favorite: $0.bool("favorite"), favoriteAt: $0.double("favorite_at")) }
     }
 
-    /// Two-way favorite sync: take the other side's favorite state when it changed more recently.
-    /// Favorites from before timestamps existed (no time on either side) are kept as favorites.
-    /// Returns how many tracks changed.
+    /// Favorites from a device that doesn't replicate yet: newest change wins.
     @discardableResult
-    func applyRemoteFavorites(_ remote: [(relPath: String, favorite: Bool, at: Double?)]) -> Int {
+    func applyRemoteFavorites(_ remote: [(relPath: String, favorite: Bool, at: Double?)], by: String = "legacy") -> Int {
         var changed = 0
         try? db.transaction {
-            for r in remote {
-                if let at = r.at {
-                    try db.execute("UPDATE tracks SET favorite = ?, favorite_at = ? WHERE rel_path = ? AND (favorite_at IS NULL OR favorite_at < ?) AND (favorite != ? OR favorite_at IS NULL OR favorite_at != ?)",
-                                   [r.favorite, at, r.relPath, at, r.favorite, at])
-                } else if r.favorite {
-                    try db.execute("UPDATE tracks SET favorite = 1 WHERE rel_path = ? AND favorite = 0 AND favorite_at IS NULL", [r.relPath])
-                } else { continue }
-                changed += db.changes
+            for r in remote where r.at != nil || r.favorite {
+                if sync.mergeFavorite(.init(u: currentUser, k: SyncStore.key(r.relPath), f: r.favorite, t: r.at ?? 1, b: by)) { changed += 1 }
             }
         }
+        if changed > 0 { refreshCache(remote.map(\.relPath)) }
         return changed
     }
 
-    /// Fold one song's stats into another (duplicate removed): plays and skips add up, latest
-    /// last-played wins, favorite if either was. Returns false if `from` isn't in the library.
+    /// A duplicate was removed: its stats count for the kept song from now on, on every device.
     @discardableResult
     func absorbStats(from: String, into keep: String) -> Bool {
-        guard from != keep, let old = track(relPath: from), track(relPath: keep) != nil else { return false }
-        try? db.execute("""
-            UPDATE tracks SET play_count = play_count + ?, skip_count = skip_count + ?,
-              last_played = NULLIF(MAX(COALESCE(last_played, 0), COALESCE(?, 0)), 0),
-              favorite_at = CASE WHEN ? = 1 AND favorite = 0 THEN ? ELSE favorite_at END,
-              favorite = MAX(favorite, ?)
-            WHERE rel_path = ?
-            """, [old.playCount, old.skipCount, old.lastPlayed, old.favorite, Date().timeIntervalSince1970, old.favorite, keep])
+        guard from != keep else { return false }
+        sync.addAlias(old: from, keep: keep)
+        refreshCache([keep])
         return true
     }
 
-    /// Merge a stats backup: max of counters, latest lastPlayed, OR of favorites.
+    /// Stats from an old-style backup: only favorites still matter (plays come from the devices).
     func mergeStats(_ entries: [PlayStatEntry]) throws {
-        try db.transaction {
-            for e in entries {
-                try db.execute("""
-                    UPDATE tracks SET play_count = MAX(play_count, ?), skip_count = MAX(skip_count, ?),
-                      last_played = NULLIF(MAX(COALESCE(last_played, 0), COALESCE(?, 0)), 0), favorite = MAX(favorite, ?)
-                    WHERE rel_path = ?
-                    """, [e.playCount, e.skipCount, e.lastPlayed, e.favorite, e.relPath])
-            }
-        }
+        applyRemoteFavorites(entries.map { ($0.relPath, $0.favorite, $0.favoriteAt) })
     }
 }

@@ -73,9 +73,23 @@ struct SettingsView: View {
     @State private var message: String?
     @State private var loadingBackups = false
     @State private var confirmWipe = false
+    @State private var addingUser = false
+    @State private var renamingUser = false
+    @State private var newUserName = ""
 
     var body: some View {
         Form {
+            Section {
+                Picker("User", selection: Binding(get: { model.currentUser }, set: { model.switchUser($0) })) {
+                    ForEach(model.users) { Text($0.name).tag($0.id) }
+                }
+                Button("Add User…") { newUserName = ""; addingUser = true }
+                Button("Rename \(model.users.first { $0.id == model.currentUser }?.name ?? "User")…") {
+                    newUserName = model.users.first { $0.id == model.currentUser }?.name ?? ""; renamingUser = true
+                }
+            } header: { Text("User") } footer: {
+                Text("Each user has their own favorites, play counts and playlists, the same on every Mac, iPhone and the web player.")
+            }
             Section("This device") {
                 TextField("Device name (shown on the Mac)", text: $model.deviceName)
                 LabeledContent("Device ID", value: String(model.deviceID.prefix(8)))
@@ -131,6 +145,16 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) { Button("OK") {} }
+        .alert("Add User", isPresented: $addingUser) {
+            TextField("Name", text: $newUserName)
+            Button("Add") { if !newUserName.isEmpty { model.addUser(newUserName) } }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Rename User", isPresented: $renamingUser) {
+            TextField("Name", text: $newUserName)
+            Button("Save") { if !newUserName.isEmpty { model.renameUser(model.currentUser, newUserName) } }
+            Button("Cancel", role: .cancel) {}
+        }
         .confirmationDialog("Remove all songs synced from the Mac? Stats are kept on the Mac.", isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { model.deleteFromDevice(store.tracks.filter { $0.origin == .server }) }
         }

@@ -59,20 +59,46 @@ struct ContentView: View {
     @EnvironmentObject var store: LibraryStore
     // remembered across launches: reopen in the section you last used
     @AppStorage("mac.section") private var savedSection = SidebarItem.songs.rawValue
-    @State private var selection: SidebarItem?
+    /// Sidebar selection: a SidebarItem's raw value, or "pl:<playlist id>".
+    @State private var selectionKey: String?
     @State private var search = ""
+
+    private var selection: SidebarItem? {
+        get { selectionKey.flatMap(SidebarItem.init(rawValue:)) }
+        nonmutating set { selectionKey = newValue?.rawValue }
+    }
+    private var selectedPlaylist: SyncStore.Playlist? {
+        guard let k = selectionKey, k.hasPrefix("pl:") else { return nil }
+        return model.playlists.first { $0.id == String(k.dropFirst(3)) }
+    }
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
+            List(selection: $selectionKey) {
                 Section("Library") {
-                    ForEach([SidebarItem.songs, .folders, .artists, .albums]) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+                    ForEach([SidebarItem.songs, .folders, .artists, .albums]) { Label($0.rawValue, systemImage: $0.icon).tag($0.rawValue) }
                 }
                 Section("Smart") {
-                    ForEach([SidebarItem.favorites, .mostPlayed, .recentlyPlayed, .recentlyAdded]) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+                    ForEach([SidebarItem.favorites, .mostPlayed, .recentlyPlayed, .recentlyAdded]) { Label($0.rawValue, systemImage: $0.icon).tag($0.rawValue) }
+                }
+                Section {
+                    ForEach(model.playlists) { p in
+                        Label(p.name, systemImage: "music.note.list").tag("pl:" + p.id)
+                            .contextMenu {
+                                Button("Rename…") { if let n = Ask.text("Rename playlist", initial: p.name) { model.renamePlaylist(p.id, n) } }
+                                Button("Delete", role: .destructive) { model.deletePlaylist(p.id) }
+                            }
+                    }
+                } header: {
+                    HStack {
+                        Text("Playlists")
+                        Spacer()
+                        Button { if let n = Ask.text("New playlist") { selectionKey = "pl:" + model.createPlaylist(n) } } label: { Image(systemName: "plus") }
+                            .buttonStyle(.plain).help("New playlist")
+                    }
                 }
                 Section("Manage") {
-                    ForEach([SidebarItem.youtube, .duplicates, .stats, .sync]) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+                    ForEach([SidebarItem.youtube, .duplicates, .stats, .sync]) { Label($0.rawValue, systemImage: $0.icon).tag($0.rawValue) }
                 }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
@@ -93,13 +119,14 @@ struct ContentView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { PlayerBar() }
         }
         .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
-        .onAppear { if selection == nil { selection = SidebarItem(rawValue: savedSection) ?? .songs } }
-        .onChange(of: selection) { _, new in if let new { savedSection = new.rawValue } }
+        .onAppear { if selectionKey == nil { selectionKey = savedSection.hasPrefix("pl:") || SidebarItem(rawValue: savedSection) != nil ? savedSection : SidebarItem.songs.rawValue } }
+        .onChange(of: selectionKey) { _, new in if let new { savedSection = new } }
         .toolbar {
+            ToolbarItem { UserMenu() }
             ToolbarItem {
                 if let p = model.activeSyncs.first {
                     // a sync is running: show its progress, click to open Sync & Devices
-                    Button { selection = .sync } label: {
+                    Button { selectionKey = SidebarItem.sync.rawValue } label: {
                         HStack(spacing: 6) {
                             if p.total > 0 { ProgressView(value: p.fraction).progressViewStyle(.circular).controlSize(.small) }
                             else { ProgressView().controlSize(.small) }
@@ -125,6 +152,15 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
+        if let p = selectedPlaylist {
+            TrackTable(tracks: store.filter(model.tracks(in: p), search), title: p.name, defaultSort: false,
+                       resetKey: p.id + "\u{1}" + search, playlistID: p.id)
+        } else {
+            sectionDetail
+        }
+    }
+
+    @ViewBuilder private var sectionDetail: some View {
         // The toolbar search filters whatever section is open (it used to replace it).
         switch selection ?? .songs {
         case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search)
@@ -160,5 +196,50 @@ struct ContentView: View {
         case .stats: "Search library"
         default: "Search \((selection ?? .songs).rawValue.lowercased())"
         }
+    }
+}
+
+/// Toolbar menu: whose plays, favorites and playlists this Mac shows.
+struct UserMenu: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let current = model.users.first { $0.id == model.currentUser }
+        Menu {
+            ForEach(model.users) { u in
+                Button { model.switchUser(u.id) } label: {
+                    if u.id == model.currentUser { Label(u.name, systemImage: "checkmark") } else { Text(u.name) }
+                }
+            }
+            Divider()
+            Button("New User…") { if let n = Ask.text("New user", message: "Each user has their own favorites, play counts and playlists, on every device.") { model.switchUser(model.addUser(n)) } }
+            if let c = current {
+                Button("Rename \(c.name)…") { if let n = Ask.text("Rename user", initial: c.name) { model.renameUser(c.id, n) } }
+                if c.id != SyncStore.defaultUserID {
+                    Button("Remove \(c.name)", role: .destructive) { model.deleteUser(c.id) }
+                }
+            }
+        } label: {
+            Label(current?.name ?? "User", systemImage: "person.crop.circle")
+        }
+        .help("Whose favorites, play counts and playlists")
+    }
+}
+
+/// Small modal text prompts (names for users and playlists).
+enum Ask {
+    @MainActor static func text(_ title: String, message: String = "", initial: String = "") -> String? {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = message
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        f.stringValue = initial
+        a.accessoryView = f
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return nil }
+        let v = f.stringValue.trimmingCharacters(in: .whitespaces)
+        return v.isEmpty ? nil : v
     }
 }

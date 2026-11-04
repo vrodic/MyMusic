@@ -118,6 +118,9 @@ func OpenDB(path string) (*DB, error) {
 	if _, err := d.Exec(schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if _, err := d.Exec(syncSchema); err != nil {
+		return nil, fmt.Errorf("sync schema: %w", err)
+	}
 	for _, m := range migrations {
 		if _, err := d.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migration %q: %w", m, err)
@@ -145,6 +148,36 @@ const trackCols = `rel_path, size, mtime, title, artist, album, album_artist, tr
 type WebTrack struct {
 	Track
 	WebPlays int `json:"webPlays"`
+}
+
+// AllTracks lists the library with `user`'s totals over every device and their favorites.
+func (db *DB) AllTracksFor(user string) ([]WebTrack, error) {
+	ts, err := db.AllTracks()
+	if err != nil {
+		return nil, err
+	}
+	stats := db.UserStats(user)
+	alias := db.aliasMap()
+	for i := range ts {
+		k := trackKey(ts[i].RelPath)
+		if a, ok := alias[k]; ok {
+			k = a
+		}
+		st := stats[k]
+		ts[i].PlayCount, ts[i].SkipCount, ts[i].Favorite, ts[i].LastPlayed, ts[i].FavoriteAt, ts[i].WebPlays = 0, 0, false, nil, nil, 0
+		if st != nil {
+			ts[i].PlayCount, ts[i].SkipCount, ts[i].Favorite = st.plays, st.skips, st.fav
+			if st.last > 0 {
+				l := st.last
+				ts[i].LastPlayed = &l
+			}
+			if st.hasFav {
+				f := st.favTS
+				ts[i].FavoriteAt = &f
+			}
+		}
+	}
+	return ts, nil
 }
 
 func (db *DB) AllTracks() ([]WebTrack, error) {

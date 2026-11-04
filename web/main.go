@@ -17,6 +17,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +36,7 @@ type server struct {
 	token      string
 	name       string
 	smbURL     string
+	replica    string // this web player's id among the peers
 	backupPath string // latest copy of the Mac's library database (for setting up a new Mac)
 	scanning   sync.Mutex
 }
@@ -61,7 +64,11 @@ func main() {
 		clockOffset.Store(v) // last known correction, until the Mac syncs again
 	}
 	host, _ := os.Hostname()
-	s := &server{db: db, root: root, token: *token, name: host, smbURL: *smbURL, backupPath: filepath.Join(filepath.Dir(*dbPath), "mac-library-backup.sqlite")}
+	host = strings.TrimSuffix(host, ".local")
+	if err := db.MigrateLegacy("web-" + host); err != nil {
+		log.Printf("sync: migrating old stats failed: %v", err)
+	}
+	s := &server{db: db, root: root, token: *token, name: host, smbURL: *smbURL, backupPath: filepath.Join(filepath.Dir(*dbPath), "mac-library-backup.sqlite"), replica: "web-" + host}
 
 	go func() {
 		for {
@@ -92,6 +99,13 @@ func main() {
 	mux.HandleFunc("GET /api/peer/removals", s.peerOnly(s.peerRemovals))
 	mux.HandleFunc("POST /api/peer/removals/ack", s.peerOnly(s.peerAckRemovals))
 
+	// peer sync (Macs, iPhones through the Macs): see sync.go
+	mux.HandleFunc("GET /api/v2/changes", s.peerOnly(s.getChanges))
+	mux.HandleFunc("POST /api/v2/changes", s.peerOnly(s.postChanges))
+	mux.HandleFunc("GET /api/users", s.users)
+	mux.HandleFunc("GET /api/playlists", s.playlists)
+	mux.HandleFunc("POST /api/playlists", s.savePlaylist)
+	mux.HandleFunc("GET /api/peer/backups", s.peerOnly(s.listBackups))
 	mux.HandleFunc("GET /api/peer/backup", s.peerOnly(s.getBackup))
 	mux.HandleFunc("POST /api/peer/backup", s.peerOnly(s.putBackup))
 
@@ -118,12 +132,19 @@ func (s *server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, map[string]any{
 		"name": s.name, "trackCount": len(ts),
 		"lastMacSync": s.db.Meta("lastMacSync"), "macName": s.db.Meta("macName"), "lastScan": s.db.Meta("lastScan"),
-		"smbURL": s.smbURL, "tokenRequired": s.token != "", "macBackupAt": s.db.Meta("macBackupAt"),
+		"smbURL": s.smbURL, "tokenRequired": s.token != "", "macBackupAt": s.db.Meta("macBackupAt"), "replica": s.replica, "backupCount": len(s.backups()),
 	})
 }
 
+func userParam(r *http.Request) string {
+	if u := r.URL.Query().Get("user"); u != "" {
+		return u
+	}
+	return defaultUser
+}
+
 func (s *server) tracks(w http.ResponseWriter, r *http.Request) {
-	ts, err := s.db.AllTracks()
+	ts, err := s.db.AllTracksFor(userParam(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -184,6 +205,14 @@ type pathsReq struct {
 	Path     string   `json:"path"`
 	Paths    []string `json:"paths"`
 	Favorite bool     `json:"favorite"`
+	User     string   `json:"user"`
+}
+
+func (q pathsReq) user() string {
+	if q.User != "" {
+		return q.User
+	}
+	return defaultUser
 }
 
 func readReq(r *http.Request) (pathsReq, error) {
@@ -201,7 +230,7 @@ func (s *server) played(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	_ = s.db.RecordPlay(q.Path)
+	_ = s.db.SyncRecordPlay(q.user(), q.Path, s.replica, true)
 	writeJSON(w, r, map[string]bool{"ok": true})
 }
 
@@ -211,7 +240,7 @@ func (s *server) skipped(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	_ = s.db.RecordSkip(q.Path)
+	_ = s.db.SyncRecordPlay(q.user(), q.Path, s.replica, false)
 	writeJSON(w, r, map[string]bool{"ok": true})
 }
 
@@ -221,7 +250,7 @@ func (s *server) favorite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", 400)
 		return
 	}
-	if err := s.db.SetFavorite(q.Paths, q.Favorite); err != nil {
+	if err := s.db.SyncSetFavorite(q.user(), q.Paths, q.Favorite, s.replica); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -233,10 +262,73 @@ func (s *server) rescan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, map[string]bool{"ok": true})
 }
 
+// MARK: peer sync, users, playlists
+
+func (s *server) getChanges(w http.ResponseWriter, r *http.Request) {
+	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
+	cs, err := s.db.Changes(since, r.URL.Query().Get("yt") == "1", s.replica, s.name)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, r, cs)
+}
+
+func (s *server) postChanges(w http.ResponseWriter, r *http.Request) {
+	var cs ChangeSet
+	if err := json.NewDecoder(io.LimitReader(r.Body, 128<<20)).Decode(&cs); err != nil {
+		http.Error(w, "bad json: "+err.Error(), 400)
+		return
+	}
+	if cs.Now != nil && cs.Replica != "" && !strings.HasPrefix(cs.Replica, "web-") {
+		// Macs keep NTP time; follow their clock so newest-wins comparisons agree
+		clockOffset.Store(*cs.Now - float64(time.Now().UnixNano())/1e9)
+	}
+	n, err := s.db.ApplyChanges(cs)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if n > 0 {
+		name := cs.Replica
+		if cs.Name != nil {
+			name = *cs.Name
+		}
+		log.Printf("sync: %d changes from %s", n, name)
+	}
+	writeJSON(w, r, map[string]int{"seq": s.db.CurrentSeq(), "changed": n})
+}
+
+func (s *server) users(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, r, s.db.SyncUsers("Me"))
+}
+
+func (s *server) playlists(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, r, s.db.Playlists(userParam(r)))
+}
+
+func (s *server) savePlaylist(w http.ResponseWriter, r *http.Request) {
+	var p PlaylistCell
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&p); err != nil || p.U == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if p.ID == "" {
+		p.ID = fmt.Sprintf("web-%d", time.Now().UnixNano())
+	}
+	p.I = nonNil(p.I)
+	p.T, p.B = now(), s.replica
+	if err := s.db.SyncSavePlaylist(p); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, r, p)
+}
+
 // MARK: duplicates
 
 func (s *server) duplicates(w http.ResponseWriter, r *http.Request) {
-	ts, err := s.db.AllTracks()
+	ts, err := s.db.AllTracksFor(userParam(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -374,9 +466,45 @@ func isASCII(s string) bool {
 
 // MARK: Mac library backup
 
-// The Mac uploads a copy of its library database every so often; a new Mac can restore it.
+// Each Mac uploads a copy of its library database every so often (its own slot, by sync id);
+// a new Mac picks one to start from.
+type BackupInfo struct {
+	Replica string `json:"replica"`
+	Name    string `json:"name"`
+	At      string `json:"at"`
+	Size    int64  `json:"size"`
+}
+
+var safeID = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+func (s *server) backupFile(replica string) string {
+	if replica == "" {
+		return s.backupPath // the single slot from before backups had owners
+	}
+	return filepath.Join(filepath.Dir(s.backupPath), "mac-backup-"+safeID.ReplaceAllString(replica, "_")+".sqlite")
+}
+
+func (s *server) backups() []BackupInfo {
+	var list []BackupInfo
+	_ = json.Unmarshal([]byte(s.db.Meta("backups")), &list)
+	out := []BackupInfo{}
+	for _, b := range list {
+		if st, err := os.Stat(s.backupFile(b.Replica)); err == nil {
+			b.Size = st.Size()
+			out = append(out, b)
+		}
+	}
+	if st, err := os.Stat(s.backupPath); err == nil && len(out) == 0 {
+		out = append(out, BackupInfo{Name: s.db.Meta("macName"), At: st.ModTime().Format(time.RFC3339), Size: st.Size()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At > out[j].At })
+	return out
+}
+
 func (s *server) putBackup(w http.ResponseWriter, r *http.Request) {
-	tmp := s.backupPath + ".upload"
+	replica, name := r.URL.Query().Get("replica"), r.URL.Query().Get("name")
+	dst := s.backupFile(replica)
+	tmp := dst + ".upload"
 	f, err := os.Create(tmp)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -389,17 +517,40 @@ func (s *server) putBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upload failed", 400)
 		return
 	}
-	if err := os.Rename(tmp, s.backupPath); err != nil {
+	if err := os.Rename(tmp, dst); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	s.db.SetMeta("macBackupAt", time.Now().Format(time.RFC3339))
-	log.Printf("peer: stored Mac library backup (%d KB)", n/1024)
-	writeJSON(w, r, map[string]bool{"ok": true})
+	at := time.Now().Format(time.RFC3339)
+	if replica != "" {
+		list := s.backups()
+		kept := []BackupInfo{}
+		for _, b := range list {
+			if b.Replica != replica && b.Replica != "" {
+				kept = append(kept, b)
+			}
+		}
+		kept = append(kept, BackupInfo{Replica: replica, Name: name, At: at})
+		b, _ := json.Marshal(kept)
+		s.db.SetMeta("backups", string(b))
+	}
+	s.db.SetMeta("macBackupAt", at)
+	log.Printf("peer: stored library backup from %q (%d KB)", name, n/1024)
+	writeJSON(w, r, map[string]string{"ok": "1", "at": at})
+}
+
+func (s *server) listBackups(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, r, s.backups())
 }
 
 func (s *server) getBackup(w http.ResponseWriter, r *http.Request) {
-	f, err := os.Open(s.backupPath)
+	replica := r.URL.Query().Get("replica")
+	if replica == "" {
+		if list := s.backups(); len(list) > 0 {
+			replica = list[0].Replica // newest
+		}
+	}
+	f, err := os.Open(s.backupFile(replica))
 	if err != nil {
 		http.Error(w, "no backup yet", http.StatusNotFound)
 		return

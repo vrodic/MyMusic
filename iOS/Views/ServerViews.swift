@@ -61,6 +61,7 @@ struct ServerSongsView: View {
                             Button { Task { await web.download([t]) } } label: { Label("Download to iPhone", systemImage: "arrow.down.circle") }
                             Button { player.playNext(t) } label: { Label("Play Next", systemImage: "text.insert") }
                             Button { player.addToQueue(t) } label: { Label("Add to Queue", systemImage: "text.append") }
+                            AddToPlaylistMenu(tracks: [t])
                             Button { web.setFavorite(t, !t.favorite) } label: {
                                 Label(t.favorite ? "Unfavorite" : "Favorite", systemImage: t.favorite ? "heart.slash" : "heart")
                             }
