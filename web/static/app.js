@@ -100,7 +100,7 @@ function viewTracks(q) {
   const T = state.tracks;
   switch (state.view) {
     case 'songs': return filterTracks(T, q);
-    case 'favorites': return filterTracks(T.filter((t) => t.favorite), q);
+    case 'favorites': return filterTracks(T.filter((t) => t.favorite).sort((a, b) => (b.favoriteAt || 0) - (a.favoriteAt || 0)), q);
     case 'mostPlayed': return filterTracks(T.filter((t) => t.playCount > 0).sort((a, b) => b.playCount - a.playCount).slice(0, 300), q);
     case 'recentlyPlayed': return filterTracks(T.filter((t) => t.lastPlayed).sort((a, b) => b.lastPlayed - a.lastPlayed).slice(0, 300), q);
     case 'recentlyAdded': return filterTracks([...T].sort((a, b) => b.addedAt - a.addedAt).slice(0, 300), q);

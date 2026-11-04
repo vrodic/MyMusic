@@ -72,7 +72,8 @@ final class LibraryStore: ObservableObject {
             .sorted(by: Self.albumOrder)
     }
 
-    var favorites: [Track] { tracks.filter(\.favorite) }
+    /// Most recently favorited first; favorites without a recorded time go last.
+    var favorites: [Track] { tracks.filter(\.favorite).sorted { $0.favoritedSort > $1.favoritedSort } }
     var mostPlayed: [Track] { tracks.filter { $0.playCount > 0 }.sorted { $0.playCount > $1.playCount }.prefix(200).map { $0 } }
     var recentlyPlayed: [Track] { tracks.filter { $0.lastPlayed != nil }.sorted { ($0.lastPlayed ?? 0) > ($1.lastPlayed ?? 0) }.prefix(200).map { $0 } }
     var recentlyAdded: [Track] { tracks.sorted { $0.addedAt > $1.addedAt }.prefix(200).map { $0 } }

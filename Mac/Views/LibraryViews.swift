@@ -36,6 +36,11 @@ struct TrackTable: View {
             TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55)
             TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45)
             TableColumn("Format", value: \.fileExtension).width(50)
+            TableColumn("Favorited", value: \.favoritedSort) { t in
+                if t.favorite, let at = t.favoriteAt {
+                    Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                }
+            }.width(90)
         }
         // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
         // table instead of letting it diff thousands of rows on the main thread (the beachball).
