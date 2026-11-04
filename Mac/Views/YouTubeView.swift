@@ -7,7 +7,7 @@ struct YouTubeView: View {
     @EnvironmentObject var store: LibraryStore   // redraw hearts when favorites change
     @State private var selection = Set<YTItem.ID>()
     var search: String = ""
-    @State private var filter: Filter = .all
+    @AppStorage("mac.ytFilter") private var filter: Filter = .all
     @State private var showLog = false
     @State private var confirmFavorite = false
     @State private var sortOrder: [KeyPathComparator<YTItem>] = [KeyPathComparator(\.playlistIndex)]
@@ -74,6 +74,7 @@ struct YouTubeView: View {
                    let t = model.store.track(rel) {
                     Button("Play") { player.play([t]) }
                     Button("Show in Finder") { model.revealInFinder(t) }
+                    SyncMenuItem(paths: rows.filter { ids.contains($0.id) }.compactMap(\.relPath))
                 }
                 Button("Open on YouTube") {
                     if let id = ids.first, let u = URL(string: "https://music.youtube.com/watch?v=\(id)") { NSWorkspace.shared.open(u) }

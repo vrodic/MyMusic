@@ -46,6 +46,7 @@ struct TrackTable: View {
             Button("Add to Queue") { picked.forEach(player.addToQueue) }
             Divider()
             Button("Toggle Favorite") { picked.forEach(model.toggleFavorite) }
+            SyncMenuItem(paths: picked.map(\.relPath))
             if let first = picked.first { Button("Show in Finder") { model.revealInFinder(first) } }
         } primaryAction: { ids in
             play(rows.first { ids.contains($0.id) }, in: rows)
@@ -84,7 +85,7 @@ struct FolderBrowser: View {
     @EnvironmentObject var store: LibraryStore
     @EnvironmentObject var player: PlayerEngine
     @Binding var search: String
-    @State private var path = ""
+    @AppStorage("mac.folderPath") private var path = ""   // reopen in the last folder
 
     var body: some View {
         let node = store.folderRoot.node(at: path) ?? store.folderRoot
@@ -110,7 +111,11 @@ struct FolderBrowser: View {
             }
             .padding(8)
             Divider()
-            VSplitView {
+            // Own split (not VSplitView): the divider position is remembered while you browse
+            // folders and across launches, and the layout doesn't jump in folders without subfolders.
+            GeometryReader { geo in
+            VStack(spacing: 0) {
+                let _ = (path.isEmpty || store.folderRoot.node(at: path) != nil) ? () : DispatchQueue.main.async { path = "" }
                 List(folders) { f in
                     HStack {
                         Image(systemName: f.path == "yt" ? "play.rectangle.fill" : "folder.fill").foregroundStyle(f.path == "yt" ? .red : .blue)
@@ -131,14 +136,27 @@ struct FolderBrowser: View {
                     .contextMenu {
                         Button("Open") { open(f.path) }
                         Button("Play") { player.play(f.allTracks) }
+                        Divider()
+                        SyncMenuItem(paths: [f.path], noun: "Folder")
                     }
                 }
-                .frame(minHeight: folders.isEmpty ? 0 : 120)
-                .overlay { if !query.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: search) } }
+                .frame(height: clampedListHeight(in: geo.size.height))
+                .overlay {
+                    if !query.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: search) }
+                    else if folders.isEmpty { Text(query.isEmpty ? "No subfolders" : "No matching folders").font(.caption).foregroundStyle(.secondary) }
+                }
+                SplitDivider(height: $folderListHeight, maxHeight: geo.size.height - 150)
                 TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name, resetKey: path + "\u{1}" + search)
-                    .frame(minHeight: 150)
+                    .frame(maxHeight: .infinity)
+            }
             }
         }
+    }
+
+    @AppStorage("mac.folderListHeight") private var folderListHeight: Double = 220
+
+    private func clampedListHeight(in total: CGFloat) -> CGFloat {
+        min(max(CGFloat(folderListHeight), 44), max(44, total - 150))
     }
 
     /// Opening a folder clears the search so you see its contents.
@@ -148,14 +166,15 @@ struct FolderBrowser: View {
 struct ArtistBrowser: View {
     @EnvironmentObject var store: LibraryStore
     var search: String = ""
-    @State private var artist: String?
+    @AppStorage("mac.artist") private var savedArtist = ""
+    private var artist: Binding<String?> { Binding(get: { savedArtist.isEmpty ? nil : savedArtist }, set: { savedArtist = $0 ?? "" }) }
 
     var body: some View {
         let q = SearchQuery(search)
         let list = q.isEmpty ? store.artists : store.artists.filter { q.matches($0.searchFolded) }
         HSplitView {
-            List(list, id: \.self, selection: $artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
-            if let artist { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false, resetKey: artist) }
+            List(list, id: \.self, selection: artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
+            if let artist = artist.wrappedValue { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false, resetKey: artist) }
             else { ContentUnavailableView("Select an artist", systemImage: "music.mic").frame(maxWidth: .infinity) }
         }
     }
@@ -164,16 +183,19 @@ struct ArtistBrowser: View {
 struct AlbumBrowser: View {
     @EnvironmentObject var store: LibraryStore
     var search: String = ""
-    @State private var album: AlbumKey?
+    @AppStorage("mac.album") private var savedAlbum = ""   // AlbumKey.id
+    private var album: Binding<AlbumKey?> {
+        Binding(get: { store.albums.first { $0.id == savedAlbum } }, set: { savedAlbum = $0?.id ?? "" })
+    }
 
     var body: some View {
         let q = SearchQuery(search)
         let list = q.isEmpty ? store.albums : store.albums.filter { q.matches(($0.album + " " + $0.artist).searchFolded) }
         HSplitView {
-            List(list, selection: $album) { a in
+            List(list, selection: album) { a in
                 VStack(alignment: .leading) { Text(a.album); Text(a.artist).font(.caption).foregroundStyle(.secondary) }.tag(a)
             }.frame(minWidth: 220, maxWidth: 340)
-            if let album { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false, resetKey: album.id) }
+            if let album = album.wrappedValue { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false, resetKey: album.id) }
             else { ContentUnavailableView("Select an album", systemImage: "square.stack").frame(maxWidth: .infinity) }
         }
     }
@@ -255,5 +277,47 @@ enum TableIdentity {
         var h = Hasher()
         parts.forEach { h.combine($0) }
         return h.finalize()
+    }
+}
+
+/// Horizontal divider you can drag to resize the view above it. Shows the resize cursor on hover.
+struct SplitDivider: View {
+    @Binding var height: Double
+    var minHeight: Double = 44
+    var maxHeight: CGFloat
+    @State private var start: Double?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(height: 1)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .onHover { inside in inside ? NSCursor.resizeUpDown.push() : NSCursor.pop() }
+            .gesture(DragGesture(minimumDistance: 1)
+                .onChanged { g in
+                    if start == nil { start = height }
+                    height = min(max(start! + g.translation.height, minHeight), Double(max(maxHeight, CGFloat(minHeight))))
+                }
+                .onEnded { _ in start = nil })
+    }
+}
+
+/// "Add to Sync" / "Remove from Sync" for songs or folders (ticks them in Sync & Devices).
+struct SyncMenuItem: View {
+    @EnvironmentObject var model: AppModel
+    let paths: [String]
+    var noun: String = ""
+
+    var body: some View {
+        if !paths.isEmpty {
+            let allSynced = paths.allSatisfy(model.isSynced)
+            Button {
+                model.setSynced(paths, !allSynced)
+            } label: {
+                Label(allSynced ? "Remove \(noun.isEmpty ? "" : noun + " ")from iPhone Sync" : "Add \(noun.isEmpty ? "" : noun + " ")to iPhone Sync",
+                      systemImage: allSynced ? "iphone.slash" : "iphone.and.arrow.forward")
+            }
+        }
     }
 }

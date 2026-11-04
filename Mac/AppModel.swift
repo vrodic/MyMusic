@@ -220,6 +220,16 @@ final class AppModel: ObservableObject {
 
     private func pushBackend() { backend.update(root: musicRoot, selection: selection, syncFavorites: syncFavorites) }
 
+    /// Is this song or folder ticked for iPhone sync (directly or through a folder above it)?
+    func isSynced(_ path: String) -> Bool { selection.contains(relPath: path) }
+
+    /// Tick or untick songs/folders for iPhone sync, as the checkboxes in Sync & Devices do.
+    func setSynced(_ paths: [String], _ on: Bool) {
+        var sel = selection
+        for p in paths where sel.contains(relPath: p) != on { sel.toggle(path: p, root: store.folderRoot) }
+        selection = sel
+    }
+
     /// Tracks that will go to devices (same rule the server uses).
     var syncedTracks: [Track] { store.tracks.filter(backend.syncFilter()) }
 

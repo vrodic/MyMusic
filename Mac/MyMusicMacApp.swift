@@ -57,7 +57,9 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var store: LibraryStore
-    @State private var selection: SidebarItem? = .songs
+    // remembered across launches: reopen in the section you last used
+    @AppStorage("mac.section") private var savedSection = SidebarItem.songs.rawValue
+    @State private var selection: SidebarItem?
     @State private var search = ""
 
     var body: some View {
@@ -97,6 +99,8 @@ struct ContentView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { PlayerBar() }
         }
         .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
+        .onAppear { if selection == nil { selection = SidebarItem(rawValue: savedSection) ?? .songs } }
+        .onChange(of: selection) { _, new in if let new { savedSection = new.rawValue } }
         .toolbar {
             ToolbarItem {
                 if let p = model.activeSyncs.first {
