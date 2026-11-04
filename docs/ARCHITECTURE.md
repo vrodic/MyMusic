@@ -4,7 +4,7 @@ Two native SwiftUI apps that share one source folder (`Shared/`):
 
 | Target | Platform | Role |
 |---|---|---|
-| **MyMusic Server** (`Mac/`) | macOS 14+ | Indexes the music root into SQLite, downloads YouTube "Liked music" with `yt-dlp`, plays music, shows library stats, serves the library over the LAN. |
+| **MyMusic for Mac** (`Mac/`) | macOS 14+ | Indexes the music root into SQLite, downloads YouTube "Liked music" with `yt-dlp`, plays music, shows library stats, serves the library over the LAN. |
 | **MyMusic** (`iOS/`) | iOS 17+ | Discovers the Mac via Bonjour, mirrors the selected folders (keeping folder structure), plays music offline, tracks favorites / play counts, exposes files to other apps. |
 
 ```

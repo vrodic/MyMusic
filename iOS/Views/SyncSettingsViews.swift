@@ -26,7 +26,7 @@ struct SyncView: View {
                     Label("Manual: \(model.manualServer)", systemImage: "network").foregroundStyle(current == nil ? .primary : .secondary)
                 }
             } header: { Text("Macs on this network") } footer: {
-                Text("Start MyMusic Server on your Mac. The folders checked in its Sync view are copied here, keeping their folder structure.")
+                Text("Open MyMusic on your Mac. The folders checked in its Sync view are copied here, keeping their folder structure.")
             }
 
             Section {

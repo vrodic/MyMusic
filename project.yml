@@ -33,9 +33,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vrodic.mymusic.server
-        PRODUCT_NAME: MyMusic Server
+        PRODUCT_NAME: MyMusic
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: MyMusic Server
+        INFOPLIST_KEY_CFBundleDisplayName: MyMusic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.music
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: MyMusic shares your library with your iPhone on the local network.
         CODE_SIGN_ENTITLEMENTS: Mac/MyMusicServer.entitlements

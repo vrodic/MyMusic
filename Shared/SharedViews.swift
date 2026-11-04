@@ -57,7 +57,10 @@ struct TrackRowLabel: View {
                 Text("\(track.displayArtist) · \(track.displayAlbum)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
+            #if os(macOS)
+            // on iPhone the heart is noise in every row; favorites are a swipe / long-press away
             if track.favorite { Image(systemName: "heart.fill").foregroundStyle(.pink).font(.caption) }
+            #endif
             if track.playCount > 0 { Text("\(track.playCount)▶").font(.caption2).foregroundStyle(.secondary) }
             Text((track.duration ?? 0).durationString).font(.caption).monospacedDigit().foregroundStyle(.secondary)
         }

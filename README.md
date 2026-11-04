@@ -1,6 +1,6 @@
 # MyMusic
 
-Personal music player: **MyMusic Server** (macOS) indexes your collection and downloads your YouTube *Liked music*;
+Personal music player: **MyMusic for Mac** indexes your collection and downloads your YouTube *Liked music*;
 **MyMusic** (iOS) syncs chosen folders over Wi‑Fi and plays them offline.
 
 A Go **web player** ([web/](web/README.md)) runs on the music server as a peer of the Mac app:
@@ -19,13 +19,13 @@ brew install xcodegen yt-dlp ffmpeg deno
 ## Build
 ```
 xcodegen generate          # creates MyMusic.xcodeproj (not committed)
-scripts/build-mac.sh       # → /Applications/MyMusic Server.app
+scripts/build-mac.sh       # → /Applications/MyMusic.app
 scripts/install-ios.sh <TEAM_ID>   # direct install to a connected iPhone
 scripts/build-ipa.sh       # → build/MyMusic.ipa for AltStore / SideStore
 ```
 
 ## First run
-1. Open **MyMusic Server** → *Choose Music Root…*. The whole root is indexed into
+1. Open **MyMusic** on the Mac → *Choose Music Root…*. The whole root is indexed into
    `~/Library/Application Support/MyMusic/library.sqlite`; all top-level folders are initially marked for sync.
 2. *Settings (⌘,) → YouTube*: choose the browser you're signed in to YouTube with (cookies). Then *YouTube Liked → Refresh Liked*.
    Songs download one at a time into `<root>/yt/`. Change priority per song (or multi-select → right click):

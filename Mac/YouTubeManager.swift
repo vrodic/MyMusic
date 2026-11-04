@@ -84,7 +84,7 @@ final class YouTubeManager: ObservableObject {
         let errLine = stderr.split(whereSeparator: \.isNewline).last { $0.contains("ERROR") }.map(String.init) ?? String(stderr.suffix(300))
         let lower = stderr.lowercased()
         if lower.contains("cookies database") || lower.contains("operation not permitted") || lower.contains("permissionerror") {
-            return "macOS blocked access to \(browser)'s cookies. Give MyMusic Server Full Disk Access (System Settings → Privacy & Security → Full Disk Access), then press Refresh Liked. Also check the right browser is picked in Settings (⌘,).\n\n\(errLine)"
+            return "macOS blocked access to \(browser)'s cookies. Give MyMusic Full Disk Access (System Settings → Privacy & Security → Full Disk Access), then press Refresh Liked. Also check the right browser is picked in Settings (⌘,).\n\n\(errLine)"
         }
         if lower.contains("sign in") || lower.contains("login") || lower.contains("does not exist") || lower.contains("private") {
             return "YouTube didn't accept the login from \(browser). Sign in to music.youtube.com in \(browser), or pick another browser in Settings (⌘,).\n\n\(errLine)"
