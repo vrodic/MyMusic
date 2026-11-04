@@ -1,0 +1,41 @@
+[Unit]
+Description=MyMusic web player (peer of the MyMusic Mac app)
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/mymusic-web -music /mnt/picko/stuff/mp3 -db /var/lib/mymusic-web/mymusic-web.sqlite -listen :47824
+# Optional shared secret the Mac app must send (Sync & Devices → Web player → Token):
+# Environment=MYMUSIC_TOKEN=change-me
+Restart=on-failure
+RestartSec=5
+
+# Run as a throwaway unprivileged user that systemd creates for this service.
+# No login account needed; it can't write anywhere except its own state folder.
+DynamicUser=yes
+# The database lives here, on the server's local disk (/var/lib/mymusic-web), owned by that user.
+StateDirectory=mymusic-web
+# The music is read-only for the player.
+ReadOnlyPaths=/mnt/picko/stuff/mp3
+# If the music isn't readable by everyone, let the player read it through its group instead:
+#   ls -ld /mnt/picko/stuff/mp3   → e.g. "drwxr-x--- love media"  → SupplementaryGroups=media
+# SupplementaryGroups=media
+
+# Extra hardening (safe for this program).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

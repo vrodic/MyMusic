@@ -98,7 +98,8 @@ final class ServerBackend: @unchecked Sendable {
             guard let id = req.query["id"] else { return .badRequest("id required") }
             return .json(DeviceEvents(commands: waitForCommands(device: id, name: req.query["name"] ?? "iPhone")))
         case ("GET", "/api/stats/devices"):
-            return .json(db.deviceBackups())
+            // iPhones restore from these; the web player isn't an iPhone backup
+            return .json(db.deviceBackups().filter { !$0.deviceID.hasPrefix("web-") })
         case ("GET", "/api/stats/device"):
             guard let id = req.query["id"] else { return .badRequest("id required") }
             return .json(db.deviceStats(id))
@@ -133,6 +134,7 @@ final class AppModel: ObservableObject {
     let backend: ServerBackend
     let server: HTTPServer
     private(set) var yt: YouTubeManager!
+    private(set) var web: WebPeer!
 
     static var supportDir: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MyMusic", isDirectory: true)
@@ -160,6 +162,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.devices = self.db.deviceBackups()
                 self.store.reload()   // favorites from the iPhone were merged in
+                self.web?.syncSoon()   // pass iPhone plays/favorites on to the web player
                 // a stats upload is the first step of a sync, so the request was picked up
                 self.syncRequested.removeAll()
             }
@@ -188,6 +191,7 @@ final class AppModel: ObservableObject {
         startServer()
         checkRemote()
         yt.start()
+        web = WebPeer(model: self)
         if musicRoot != nil { Task { await rescan() } }
     }
 
@@ -257,6 +261,7 @@ final class AppModel: ObservableObject {
         try? db.delete(result.removed)
         store.reload()
         isScanning = false
+        web?.syncSoon()
         scanStatus = "\(result.total) tracks · \(result.changed.count) updated · \(result.removed.count) removed"
     }
 
@@ -290,6 +295,7 @@ final class AppModel: ObservableObject {
         try? db.upsert([t])
         if let item = db.ytItems().first(where: { $0.relPath == rel }), item.favorite { db.setFavorite(rel, true) }
         store.reload()
+        web?.syncSoon(after: 60)
     }
 
     /// Moves every non-kept copy to the Trash (or <root>/.duplicates when the volume has no Trash), merging stats into the keeper.
@@ -338,7 +344,15 @@ final class AppModel: ObservableObject {
 
     func revealInFinder(_ t: Track) { NSWorkspace.shared.activateFileViewerSelecting([url(for: t)]) }
 
+    /// Called after the web player's stats were stored (favorites may have changed).
+    func afterWebPull() {
+        store.reload()
+        player.refreshAll(store.track)
+        devices = db.deviceBackups()
+    }
+
     func toggleFavorite(_ t: Track) {
+        defer { web?.syncSoon() }
         let u = store.toggleFavorite(t)
         player.refresh(u)
     }

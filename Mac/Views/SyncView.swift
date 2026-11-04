@@ -73,6 +73,7 @@ struct SyncView: View {
                 } header: { Text("iPhones online") } footer: {
                     Text("An iPhone shows up here while the MyMusic app is open (or playing in the background).")
                 }
+                WebPeerSection()
                 Section("Devices (stats backups)") {
                     if model.devices.isEmpty { Text("No device has synced yet.").foregroundStyle(.secondary) }
                     ForEach(model.devices) { d in
@@ -224,6 +225,34 @@ struct FileCheckRow: View {
             Spacer()
             if viaFavorite { Image(systemName: "heart.fill").foregroundStyle(.pink).help("Synced because it's a favorite") }
             Text(ByteCountFormatter.string(fromByteCount: track.size, countStyle: .file)).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Settings + status for the Go web player peer.
+struct WebPeerSection: View {
+    @EnvironmentObject var web: WebPeer
+
+    var body: some View {
+        Section {
+            TextField("Web player address", text: $web.url, prompt: Text("http://192.168.100.7:47824"))
+                .onSubmit { web.syncSoon(after: 0) }
+            SecureField("Token (if the server uses one)", text: $web.token)
+            if web.baseURL != nil {
+                HStack {
+                    if web.isSyncing { ProgressView().controlSize(.small); Text("Syncing…").foregroundStyle(.secondary) }
+                    else if let err = web.lastError { Label(err, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                    else if let d = web.lastSync {
+                        Label("Synced \(d.formatted(.relative(presentation: .named)))", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                    Spacer()
+                    Button("Sync Now") { Task { await web.sync() } }.disabled(web.isSyncing)
+                    if let u = web.baseURL { Button("Open") { NSWorkspace.shared.open(u) } }
+                }
+                if let r = web.lastResult { Text(r).font(.caption).foregroundStyle(.secondary) }
+            }
+        } header: { Text("Web player") } footer: {
+            Text("Runs on your music server (see web/README.md). Gets your library, play counts and favorites every few minutes, and sends back what you play and favorite in the browser.")
         }
     }
 }

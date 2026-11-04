@@ -3,7 +3,11 @@
 Personal music player: **MyMusic Server** (macOS) indexes your collection and downloads your YouTube *Liked music*;
 **MyMusic** (iOS) syncs chosen folders over Wi‑Fi and plays them offline.
 
+A Go **web player** ([web/](web/README.md)) runs on the music server as a peer of the Mac app:
+it syncs library, play counts and favorites with the Mac when both are up, and works on its own when the Mac is off.
+
 * Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+* Web player: [web/README.md](web/README.md)
 * Signing / cert renewal / not losing data: [docs/CERTIFICATES.md](docs/CERTIFICATES.md)
 
 ## Requirements

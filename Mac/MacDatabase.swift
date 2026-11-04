@@ -155,8 +155,9 @@ extension LibraryDB {
     }
 
     /// Sum of plays across all devices, per track.
-    func devicePlayTotals() -> [String: DeviceStatTotal] {
-        let rows = (try? db.query("SELECT rel_path, SUM(play_count) AS p, MAX(favorite) AS f FROM device_stats GROUP BY rel_path")) ?? []
+    func devicePlayTotals(excluding deviceID: String? = nil) -> [String: DeviceStatTotal] {
+        let rows = (try? db.query("SELECT rel_path, SUM(play_count) AS p, MAX(favorite) AS f FROM device_stats WHERE device_id != ? GROUP BY rel_path",
+                                  [deviceID ?? ""])) ?? []
         var out: [String: DeviceStatTotal] = [:]
         for r in rows {
             let p = r.string("rel_path") ?? ""

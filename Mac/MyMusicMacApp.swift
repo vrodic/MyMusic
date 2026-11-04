@@ -11,6 +11,7 @@ struct MyMusicMacApp: App {
                 .environmentObject(model.store)
                 .environmentObject(model.player)
                 .environmentObject(model.yt)
+                .environmentObject(model.web)
                 .frame(minWidth: 960, minHeight: 600)
         }
         .commands {

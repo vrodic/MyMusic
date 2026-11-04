@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16161a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<title>MyMusic</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♪</text></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <button id="menuBtn" class="icon-btn only-mobile" aria-label="Menu">☰</button>
+  <div class="brand">♪ MyMusic</div>
+  <input id="search" type="search" placeholder="Search" autocomplete="off" spellcheck="false">
+  <button id="reloadBtn" class="icon-btn" title="Reload library">↻</button>
+</header>
+
+<nav id="nav" class="side">
+  <div class="nav-group">Library</div>
+  <a data-view="songs">Songs</a>
+  <a data-view="folders">Folders</a>
+  <a data-view="artists">Artists</a>
+  <a data-view="albums">Albums</a>
+  <div class="nav-group">Smart</div>
+  <a data-view="favorites">Favorites</a>
+  <a data-view="mostPlayed">Most Played</a>
+  <a data-view="recentlyPlayed">Recently Played</a>
+  <a data-view="recentlyAdded">Recently Added</a>
+  <a data-view="youtube">YouTube Likes</a>
+  <div class="nav-status" id="status"></div>
+</nav>
+
+<main id="main">
+  <div class="view-head">
+    <div id="crumbs" class="crumbs"></div>
+    <div class="view-actions">
+      <span id="count" class="muted"></span>
+      <button id="playAll" class="btn">▶ Play</button>
+      <button id="shuffleAll" class="btn">⤮ Shuffle</button>
+    </div>
+  </div>
+  <div id="folders" class="folders"></div>
+  <div id="list" class="list" role="list"></div>
+  <div id="sentinel"></div>
+  <div id="empty" class="empty" hidden></div>
+</main>
+
+<footer class="player">
+  <img id="art" class="art" alt="">
+  <div class="now">
+    <div id="nowTitle" class="now-title">Not playing</div>
+    <div id="nowSub" class="now-sub muted"></div>
+  </div>
+  <button id="favBtn" class="icon-btn fav" title="Favorite" hidden>♡</button>
+  <div class="controls">
+    <button id="shuffleBtn" class="icon-btn toggle" title="Shuffle">⤮</button>
+    <button id="prevBtn" class="icon-btn" title="Previous">⏮</button>
+    <button id="playBtn" class="icon-btn play" title="Play/Pause">▶</button>
+    <button id="nextBtn" class="icon-btn" title="Next">⏭</button>
+    <button id="repeatBtn" class="icon-btn toggle" title="Repeat">↻</button>
+  </div>
+  <div class="seek">
+    <span id="cur" class="time">0:00</span>
+    <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+    <span id="dur" class="time">0:00</span>
+  </div>
+  <input id="vol" class="vol" type="range" min="0" max="1" step="0.01" aria-label="Volume">
+  <audio id="audio" preload="auto"></audio>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
