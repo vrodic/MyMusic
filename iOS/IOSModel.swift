@@ -29,14 +29,14 @@ final class IOSModel: ObservableObject {
         db = try! LibraryDB(path: Self.supportDir.appendingPathComponent("library.sqlite").path,
                             extraMigrations: [LibraryDB.favoriteAtMigration])
         store = LibraryStore(db: db)
-        player = PlayerEngine(urlFor: { IOSModel.musicDir.appendingPathComponent($0.relPath) })
+        player = PlayerEngine(urlFor: { IOSModel.musicDir.appendingFile($0.relPath) })
         player.onPlayCounted = { [weak self] t in self?.store.recordPlay(t) }
         player.onSkipped = { [weak self] t in self?.store.recordSkip(t) }
         browser.start()
         Task { await scanLocal() }
     }
 
-    func url(for t: Track) -> URL { Self.musicDir.appendingPathComponent(t.relPath) }
+    func url(for t: Track) -> URL { Self.musicDir.appendingFile(t.relPath) }
 
     /// Picks up files added through the Files app / importer and removes rows for files deleted there.
     func scanLocal() async {

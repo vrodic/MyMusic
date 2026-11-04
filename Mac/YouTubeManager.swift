@@ -39,6 +39,9 @@ final class YouTubeManager: ObservableObject {
     }
 
     private let rootIsRemote: () -> Bool
+    /// Your own (non-YouTube) songs, for "already in library?" matching.
+    var libraryProvider: () -> [Track] = { [] }
+    @Published private(set) var isMatching = false
 
     init(db: LibraryDB, root: @escaping () -> URL?, rootIsRemote: @escaping () -> Bool, onDownloaded: @escaping (String) async -> Void) {
         self.db = db
@@ -155,6 +158,7 @@ final class YouTubeManager: ObservableObject {
             lastRefresh = Date().timeIntervalSince1970
             lastError = nil
             reload()
+            await checkLibraryMatches()
             statusLine = "Indexed \(parsed.count) liked songs"
             appendLog(statusLine)
             poke()
@@ -183,6 +187,39 @@ final class YouTubeManager: ObservableObject {
     private var nextDelay: Double = 0
 
     var isCoolingDown: Bool { cooldownUntil > Date().timeIntervalSince1970 }
+
+    // MARK: already in the library?
+
+    /// Fuzzy-match every liked song that isn't downloaded yet against your own songs. Likely
+    /// matches stop being downloaded; manual "in library" marks (score 1 with no path) are kept.
+    func checkLibraryMatches() async {
+        guard !isMatching else { return }
+        isMatching = true
+        defer { isMatching = false }
+        let library = libraryProvider().filter { $0.source != .youtube }
+        let pending = items.filter { $0.status != .done && !($0.matchScore == 1 && $0.libraryMatch == "") }
+        let results = await offMain { () -> [String: YTLibraryMatcher.Match?] in
+            let index = YTLibraryMatcher.Index(library: library)
+            var out: [String: YTLibraryMatcher.Match?] = [:]
+            for it in pending {
+                out[it.videoID] = index.bestMatch(title: it.title, uploader: it.uploader, duration: it.duration,
+                                                  threshold: YTLibraryMatcher.possibleThreshold)
+            }
+            return out
+        }
+        db.setYTLibraryMatches(results)
+        reload()
+        let likely = items.filter(\.likelyInLibrary).count
+        appendLog("library check: \(likely) liked songs look like they're already in your library")
+        poke()
+    }
+
+    func downloadAnyway(_ ids: Set<String>) { db.setYTMatchOverride(Array(ids), true); reload(); poke() }
+    func markInLibrary(_ ids: Set<String>) {
+        db.markYTInLibrary(Array(ids))
+        if let cur = currentID, ids.contains(cur), !currentForced { cancelCurrent() }
+        reload()
+    }
 
     // MARK: priorities
 

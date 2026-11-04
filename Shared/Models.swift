@@ -48,6 +48,9 @@ struct LibraryManifest: Codable {
     var apiVersion: Int
     var generatedAt: Double
     var tracks: [Track]
+    /// Songs removed as duplicates: old path → the copy that was kept. Receivers move their own
+    /// plays/favorites for the old path onto the kept copy before deleting it.
+    var merges: [String: String]? = nil
 }
 
 struct ServerInfo: Codable {
@@ -120,6 +123,13 @@ extension URL {
         let pr = standardizedFileURL.resolvingSymlinksInPath().path
         guard pr.hasPrefix(rr + "/") else { return nil }
         return String(pr.dropFirst(rr.count + 1))
+    }
+
+    /// `self` + relative path to a *file*, without the disk check `appendingPathComponent(_:)`
+    /// does to see whether the result is a folder (one stat per call — slow on SMB, and it
+    /// froze the UI when the player built the next song's URL).
+    func appendingFile(_ relPath: String) -> URL {
+        appending(path: relPath, directoryHint: .notDirectory)
     }
 
     /// Whether this file lives on a network volume (SMB/AFP/NFS). One stat; call off the main thread.

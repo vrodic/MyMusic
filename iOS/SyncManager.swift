@@ -168,6 +168,10 @@ final class SyncManager: ObservableObject {
             if done % 20 == 0 { model.store.reload() }
         }
 
+        // 4a. duplicates removed on the Mac / web player: move this phone's plays and favorite to
+        //     the kept copy first, so they aren't lost with the deleted file
+        for (old, keep) in manifest.merges ?? [:] { model.db.absorbStats(from: old, into: keep) }
+
         // 4. remove tracks that disappeared on the Mac (never touches local imports)
         var removed = 0
         if !Task.isCancelled && model.removeDeleted {

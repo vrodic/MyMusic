@@ -81,9 +81,13 @@ func main() {
 	mux.HandleFunc("POST /api/skipped", s.skipped)
 	mux.HandleFunc("POST /api/favorite", s.favorite)
 	mux.HandleFunc("POST /api/rescan", s.rescan)
+	mux.HandleFunc("GET /api/duplicates", s.duplicates)
+	mux.HandleFunc("POST /api/duplicates/remove", s.removeDuplicatesHandler)
 	// peer sync with the Mac app
 	mux.HandleFunc("GET /api/peer/stats", s.peerOnly(s.peerStats))
 	mux.HandleFunc("POST /api/peer/library", s.peerOnly(s.peerLibrary))
+	mux.HandleFunc("GET /api/peer/removals", s.peerOnly(s.peerRemovals))
+	mux.HandleFunc("POST /api/peer/removals/ack", s.peerOnly(s.peerAckRemovals))
 
 	log.Printf("mymusic-web: music %s, database %s, listening on %s", root, *dbPath, *listen)
 	log.Fatal(http.ListenAndServe(*listen, logRequests(mux)))
@@ -221,7 +225,63 @@ func (s *server) rescan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, map[string]bool{"ok": true})
 }
 
+// MARK: duplicates
+
+func (s *server) duplicates(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.db.AllTracks()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	start := time.Now()
+	groups := FindDuplicates(ts, s.root)
+	if groups == nil {
+		groups = []DupGroup{}
+	}
+	log.Printf("duplicates: %d groups among %d tracks in %s", len(groups), len(ts), time.Since(start).Round(time.Millisecond))
+	writeJSON(w, r, groups)
+}
+
+func (s *server) removeDuplicatesHandler(w http.ResponseWriter, r *http.Request) {
+	var plans []RemovePlan
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&plans); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	removed, failed := s.removeDuplicates(plans)
+	log.Printf("duplicates: removed %d, %d failed", removed, len(failed))
+	if failed == nil {
+		failed = []string{}
+	}
+	writeJSON(w, r, map[string]any{"removed": removed, "failed": failed})
+}
+
 // MARK: peer API (Mac app)
+
+// The Mac pulls duplicates removed here (before pushing its library, so it doesn't re-add them).
+func (s *server) peerRemovals(w http.ResponseWriter, r *http.Request) {
+	list, err := s.db.PendingRemovals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, r, list)
+}
+
+func (s *server) peerAckRemovals(w http.ResponseWriter, r *http.Request) {
+	var q struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&q); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if err := s.db.AckRemovals(q.IDs); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, r, map[string]bool{"ok": true})
+}
 
 func (s *server) peerOnly(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

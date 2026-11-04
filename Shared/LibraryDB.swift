@@ -145,6 +145,21 @@ final class LibraryDB: @unchecked Sendable {
         return changed
     }
 
+    /// Fold one song's stats into another (duplicate removed): plays and skips add up, latest
+    /// last-played wins, favorite if either was. Returns false if `from` isn't in the library.
+    @discardableResult
+    func absorbStats(from: String, into keep: String) -> Bool {
+        guard from != keep, let old = track(relPath: from), track(relPath: keep) != nil else { return false }
+        try? db.execute("""
+            UPDATE tracks SET play_count = play_count + ?, skip_count = skip_count + ?,
+              last_played = NULLIF(MAX(COALESCE(last_played, 0), COALESCE(?, 0)), 0),
+              favorite_at = CASE WHEN ? = 1 AND favorite = 0 THEN ? ELSE favorite_at END,
+              favorite = MAX(favorite, ?)
+            WHERE rel_path = ?
+            """, [old.playCount, old.skipCount, old.lastPlayed, old.favorite, Date().timeIntervalSince1970, old.favorite, keep])
+        return true
+    }
+
     /// Merge a stats backup: max of counters, latest lastPlayed, OR of favorites.
     func mergeStats(_ entries: [PlayStatEntry]) throws {
         try db.transaction {

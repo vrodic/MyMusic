@@ -21,6 +21,13 @@ accent-insensitive search (same rules as the apps) that also finds folders at an
 shuffle, repeat, seeking, embedded cover art, lock-screen/media-key controls (Media Session API),
 favorite one song or a whole list (♥ header), play counts. Works on phones too.
 
+**Duplicates** (sidebar → Tools): finds byte-identical files and the same song stored twice, right on
+the server's disk (≈0.3 s for 3,400 songs). Extra copies are moved to a hidden `.duplicates` folder in
+the music root (not deleted), and their plays and favorites move to the copy you keep. On its next sync
+the Mac folds each removal into its own library (its counts, iPhone backups, YouTube links) *before*
+pushing, and passes a merge list on, so iPhones move their own counts to the kept copy before deleting
+the file. Empty `.duplicates` yourself once you're sure.
+
 ## Install on the music server (Linux)
 
 ```sh

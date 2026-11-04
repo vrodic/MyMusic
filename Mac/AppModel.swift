@@ -78,12 +78,12 @@ final class ServerBackend: @unchecked Sendable {
         case ("GET", "/api/library"):
             let tracks = db.allTracks().filter(syncFilter())
             return .json(LibraryManifest(serverName: name, apiVersion: MyMusicService.apiVersion,
-                                         generatedAt: Date().timeIntervalSince1970, tracks: tracks))
+                                         generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: db.recentMerges()))
         case ("GET", "/api/file"), ("HEAD", "/api/file"):
             guard let root, let rel = req.query["path"], let t = db.track(relPath: rel), syncFilter()(t) else { return .notFound }
             // Only indexed paths get here; reject any ".." without touching the file system.
             guard !rel.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { return .notFound }
-            return .file(root.appendingPathComponent(rel))
+            return .file(root.appendingFile(rel))
         case ("POST", "/api/stats"):
             guard let up = try? JSONDecoder().decode(StatsUpload.self, from: req.body) else { return .badRequest("bad json") }
             do { try db.storeDeviceStats(up) } catch { return .data(status: 500, contentType: "text/plain", body: Data("\(error)".utf8)) }
@@ -152,7 +152,7 @@ final class AppModel: ObservableObject {
         backend = ServerBackend(db: db, name: UserDefaults.standard.string(forKey: "server.name") ?? Host.current().localizedName ?? "My Mac")
         server = HTTPServer(handler: { [backend] in backend.handle($0) })
         player = PlayerEngine(urlFor: { t in
-            URL(fileURLWithPath: UserDefaults.standard.string(forKey: "musicRoot") ?? "/", isDirectory: true).appendingPathComponent(t.relPath)
+            URL(fileURLWithPath: UserDefaults.standard.string(forKey: "musicRoot") ?? "/", isDirectory: true).appendingFile(t.relPath)
         })
         yt = YouTubeManager(db: db, root: { [weak self] in self?.musicRoot }, rootIsRemote: { [weak self] in self?.rootIsRemote ?? false }, onDownloaded: { [weak self] rel in await self?.indexFile(rel) })
 
@@ -188,6 +188,7 @@ final class AppModel: ObservableObject {
         player.onSkipped = { [weak self] t in self?.store.recordSkip(t) }
         devices = db.deviceBackups()
 
+        yt.libraryProvider = { [weak self] in self?.store.tracks ?? [] }
         startServer()
         checkRemote()
         yt.start()
@@ -237,7 +238,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(try? JSONEncoder().encode(selection), forKey: "syncSelection")
     }
 
-    func url(for t: Track) -> URL { (musicRoot ?? URL(fileURLWithPath: "/")).appendingPathComponent(t.relPath) }
+    func url(for t: Track) -> URL { (musicRoot ?? URL(fileURLWithPath: "/", isDirectory: true)).appendingFile(t.relPath) }
 
     // MARK: root & scanning
 
@@ -271,6 +272,7 @@ final class AppModel: ObservableObject {
         try? db.delete(result.removed)
         await store.reloadNow()
         isScanning = false
+        Task { await yt.checkLibraryMatches() }
         web?.syncSoon()
         scanStatus = "\(result.total) tracks · \(result.changed.count) updated · \(result.removed.count) removed"
     }
@@ -295,7 +297,7 @@ final class AppModel: ObservableObject {
 
     func indexFile(_ rel: String) async {
         guard let root = musicRoot else { return }
-        let url = root.appendingPathComponent(rel)
+        let url = root.appendingFile(rel)
         let stamp = await offMain { () -> (Int64, Double)? in
             guard let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
             return (Int64(v.fileSize ?? 0), (v.contentModificationDate ?? Date()).timeIntervalSince1970.rounded())
@@ -318,12 +320,12 @@ final class AppModel: ObservableObject {
             let fm = FileManager.default
             var out: [String: String?] = [:]
             for rel in paths {
-                let url = root.appendingPathComponent(rel)
+                let url = root.appendingFile(rel)
                 do {
                     do {
                         try fm.trashItem(at: url, resultingItemURL: nil)
                     } catch {
-                        let dest = root.appendingPathComponent(".duplicates").appendingPathComponent(rel)
+                        let dest = root.appendingPathComponent(".duplicates", isDirectory: true).appendingFile(rel)
                         try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                         if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
                         try fm.moveItem(at: url, to: dest)
@@ -353,6 +355,23 @@ final class AppModel: ObservableObject {
     }
 
     func revealInFinder(_ t: Track) { NSWorkspace.shared.activateFileViewerSelecting([url(for: t)]) }
+
+    /// Duplicates removed on the web player: fold each into its kept copy here (the file is already
+    /// gone from the share), so this Mac, the iPhones and the next push all agree.
+    func applyWebRemovals(_ list: [WebRemoval]) {
+        for r in list {
+            if let t = db.track(relPath: r.path) {
+                db.mergeStats(from: t, into: r.keep)
+            } else {
+                // already dropped (e.g. by a rescan): still move device counts and remember the merge
+                db.moveDeviceStats(from: r.path, to: r.keep)
+                db.recordMerge(old: r.path, keep: r.keep)
+            }
+            try? db.delete([r.path])
+            if player.current?.relPath == r.path { player.stop() }
+        }
+        if !list.isEmpty { store.reload(); yt.reload() }
+    }
 
     /// Called after the web player's stats were stored (favorites may have changed).
     func afterWebPull() {

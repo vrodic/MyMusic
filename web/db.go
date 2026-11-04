@@ -42,6 +42,17 @@ type LibraryManifest struct {
 	APIVersion  int     `json:"apiVersion"`
 	GeneratedAt float64 `json:"generatedAt"`
 	Tracks      []Track `json:"tracks"`
+	// Songs removed as duplicates on the Mac: old path → the copy that was kept (Mac spelling).
+	Merges map[string]string `json:"merges,omitempty"`
+}
+
+type Removal struct {
+	ID        int64   `json:"id"`
+	Path      string  `json:"path"`
+	Keep      string  `json:"keep"`
+	BasePlays int     `json:"basePlays"`
+	Favorite  bool    `json:"favorite"`
+	RemovedAt float64 `json:"removedAt"`
 }
 
 type PlayStatEntry struct {
@@ -81,6 +92,13 @@ CREATE TABLE IF NOT EXISTS tracks (
 	favorite_at REAL
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Duplicates removed here, waiting for the Mac to fold them into its library (paths in the Mac's spelling).
+CREATE TABLE IF NOT EXISTS removals (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	path TEXT NOT NULL, keep TEXT NOT NULL,
+	base_plays INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0,
+	removed_at REAL NOT NULL, acked INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // Columns added after the first release (ALTER fails harmlessly if they exist).
@@ -300,6 +318,16 @@ func (db *DB) ApplyMacLibrary(m LibraryManifest, diskPath func(string) string) (
 			return 0, 0, 0, err
 		}
 	}
+	// Mac removed duplicates: move our web plays onto the kept copy before dropping the old one.
+	for oldMac, keepMac := range m.Merges {
+		oldP, keepP := diskPath(oldMac), diskPath(keepMac)
+		if oldP == keepP || seen[oldP] {
+			continue
+		}
+		if _, err = absorb(tx, oldP, keepP); err != nil {
+			return 0, 0, 0, err
+		}
+	}
 	// drop Mac tracks the Mac removed
 	rows, err = tx.Query("SELECT rel_path FROM tracks WHERE origin = 'mac'")
 	if err != nil {
@@ -344,6 +372,100 @@ func (db *DB) WebStats() ([]PlayStatEntry, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// absorb folds one track's web stats into another (inside a transaction). Returns false if the
+// source row doesn't exist.
+func absorb(tx *sql.Tx, from, into string) (bool, error) {
+	var plays, skips, fav int
+	var last sql.NullFloat64
+	err := tx.QueryRow("SELECT play_count, skip_count, last_played, favorite FROM tracks WHERE rel_path = ?", from).Scan(&plays, &skips, &last, &fav)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(`UPDATE tracks SET play_count = play_count + ?, skip_count = skip_count + ?,
+		last_played = NULLIF(MAX(COALESCE(last_played, 0), COALESCE(?, 0)), 0),
+		favorite = CASE WHEN ? = 1 THEN 1 ELSE favorite END,
+		favorite_at = CASE WHEN ? = 1 AND favorite = 0 THEN ? ELSE favorite_at END
+		WHERE rel_path = ?`, plays, skips, last, fav, fav, now(), into)
+	return err == nil, err
+}
+
+// RecordRemoval: after a duplicate's file was moved away, fold its stats into the kept copy,
+// log the removal for the Mac, and drop the row.
+func (db *DB) RecordRemoval(rel, keep string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	var macPath, keepMac string
+	var base, fav int
+	if err := tx.QueryRow("SELECT COALESCE(mac_path, rel_path), base_play_count, favorite FROM tracks WHERE rel_path = ?", rel).Scan(&macPath, &base, &fav); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.QueryRow("SELECT COALESCE(mac_path, rel_path) FROM tracks WHERE rel_path = ?", keep).Scan(&keepMac); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := absorb(tx, rel, keep); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Mac-side plays shown here until the Mac merges and pushes again
+	if _, err := tx.Exec("UPDATE tracks SET base_play_count = base_play_count + ? WHERE rel_path = ?", base, keep); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO removals (path, keep, base_plays, favorite, removed_at) VALUES (?,?,?,?,?)", macPath, keepMac, base, fav, now()); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM tracks WHERE rel_path = ?", rel); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (db *DB) PendingRemovals() ([]Removal, error) {
+	rows, err := db.sql.Query("SELECT id, path, keep, base_plays, favorite, removed_at FROM removals WHERE acked = 0 ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Removal{}
+	for rows.Next() {
+		var r Removal
+		var fav int
+		if err := rows.Scan(&r.ID, &r.Path, &r.Keep, &r.BasePlays, &fav, &r.RemovedAt); err != nil {
+			return nil, err
+		}
+		r.Favorite = fav != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) AckRemovals(ids []int64) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec("UPDATE removals SET acked = 1 WHERE id = ?", id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (db *DB) RecordPlay(relPath string) error {

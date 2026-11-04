@@ -102,3 +102,19 @@ main { position: fixed; top: var(--top-h); bottom: var(--player-h); left: var(--
   .vol { display: none; }
 }
 @media (min-width: 761px) { .row .title small { display: none; } }
+
+/* duplicates */
+.dup-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.dup-group { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+.dup-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.dup-head .tag { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.dup-head .tag.identical { background: rgba(52, 199, 89, .15); color: #2f9e55; }
+.dup-head .ignore { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted); background: none; border: 0; cursor: pointer; }
+.dup-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid var(--line); }
+.dup-row:last-child { border-bottom: 0; }
+.dup-row .keep { border: 0; background: none; cursor: pointer; font-size: 17px; width: 24px; }
+.dup-row.remove .info { opacity: .55; }
+.dup-row .info { flex: 1; min-width: 0; }
+.dup-row .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.dup-row .meta { font-size: 12px; color: var(--muted); }
+.btn.danger { border-color: #e5484d; color: #e5484d; }

@@ -81,7 +81,27 @@ final class WebPeer: ObservableObject {
             webDeviceName = web.deviceName
             model.afterWebPull()
 
-            // 2. push library with Mac-side totals (excluding the web player's own plays)
+            // 2. duplicates removed on the web player (before pushing, or the push would re-add them)
+            var removedHere = 0
+            if var rq = request("api/peer/removals") {
+                rq.httpMethod = "GET"
+                let (rdata, rresp) = try await session.data(for: rq)
+                try check(rresp, rdata)
+                let removals = try JSONDecoder().decode([WebRemoval].self, from: rdata)
+                if !removals.isEmpty {
+                    model.applyWebRemovals(removals)
+                    removedHere = removals.count
+                    if var ack = request("api/peer/removals/ack") {
+                        ack.httpMethod = "POST"
+                        ack.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        ack.httpBody = try JSONEncoder().encode(["ids": removals.map(\.id)])
+                        let (adata, aresp) = try await session.data(for: ack)
+                        try check(aresp, adata)
+                    }
+                }
+            }
+
+            // 3. push library with Mac-side totals (excluding the web player's own plays)
             let others = model.db.devicePlayTotals(excluding: web.deviceID)
             let tracks = model.db.allTracks().map { t -> Track in
                 var t = t
@@ -89,7 +109,7 @@ final class WebPeer: ObservableObject {
                 return t
             }
             let manifest = LibraryManifest(serverName: model.serverName, apiVersion: MyMusicService.apiVersion,
-                                           generatedAt: Date().timeIntervalSince1970, tracks: tracks)
+                                           generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: model.db.recentMerges())
             push.httpMethod = "POST"
             push.setValue("application/json", forHTTPHeaderField: "Content-Type")
             push.httpBody = try JSONEncoder().encode(manifest)
@@ -99,6 +119,7 @@ final class WebPeer: ObservableObject {
             lastResult = "\(r["tracks"] ?? tracks.count) songs · \(r["added"] ?? 0) added · \(r["removed"] ?? 0) removed"
                 + ((r["favoritesChanged"] ?? 0) > 0 ? " · \(r["favoritesChanged"]!) favorites" : "")
                 + " · \(web.entries.filter { $0.playCount > 0 }.count) songs played on the web"
+                + (removedHere > 0 ? " · \(removedHere) duplicates removed on the web" : "")
             lastSync = Date()
             lastError = nil
         } catch {
@@ -115,4 +136,14 @@ final class WebPeer: ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(String(data: data.prefix(200), encoding: .utf8) ?? "")"])
         }
     }
+}
+
+/// A duplicate removed on the web player (paths in this Mac's spelling).
+struct WebRemoval: Codable {
+    var id: Int64
+    var path: String
+    var keep: String
+    var basePlays: Int
+    var favorite: Bool
+    var removedAt: Double
 }

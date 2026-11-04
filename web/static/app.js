@@ -91,6 +91,7 @@ const filterTracks = (list, q) => (q.empty ? list : list.filter((t) => q.test(st
 const VIEWS = {
   songs: 'Songs', folders: 'Folders', artists: 'Artists', albums: 'Albums', favorites: 'Favorites',
   mostPlayed: 'Most Played', recentlyPlayed: 'Recently Played', recentlyAdded: 'Recently Added', youtube: 'YouTube Likes',
+  duplicates: 'Duplicates',
 };
 
 function viewTracks(q) {
@@ -110,12 +111,21 @@ function viewTracks(q) {
 
 function render() {
   if (!state.tree) return;
+  if (state.view !== 'duplicates') { $('list').style.background = ''; $('list').style.border = ''; }
+  $('playAll').hidden = $('shuffleAll').hidden = state.view === 'duplicates';
   const q = makeQuery(state.query);
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
   const crumbs = $('crumbs'), folders = $('folders'), empty = $('empty');
   folders.innerHTML = ''; empty.hidden = true;
   let tracks = [];
 
+  if (state.view === 'duplicates') {
+    crumbs.textContent = 'Duplicates';
+    $('count').textContent = '';
+    state.shown = [];
+    renderDuplicates(q);
+    return;
+  }
   if (state.view === 'folders') {
     const node = nodeAt(state.folder);
     const parts = state.folder ? state.folder.split('/') : [];
@@ -198,6 +208,81 @@ function refreshRow(t) {
   if (btn) { btn.classList.toggle('on', t.favorite); btn.textContent = t.favorite ? '♥' : '♡'; }
   updateNowPlaying();
 }
+
+// ---------- duplicates (found and removed on the server; the Mac and iPhone follow on their next sync)
+const dup = { groups: null, scanning: false, msg: '' };
+const ext = (p) => p.split('.').pop().toUpperCase();
+const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+
+async function scanDuplicates() {
+  dup.scanning = true; dup.msg = ''; render();
+  const t0 = performance.now();
+  try {
+    dup.groups = await (await fetch('api/duplicates')).json();
+    dup.msg = `Checked ${state.tracks.length} songs in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+  } catch (e) { dup.msg = 'Scan failed: ' + e; }
+  dup.scanning = false; render();
+}
+
+function renderDuplicates(q) {
+  const list = $('list'), groups = dup.groups;
+  $('folders').innerHTML = '';
+  const visible = (groups || []).filter((g) => q.empty || g.tracks.some((t) => q.test(state.keys.get(t.relPath) || fold(t.title + ' ' + t.relPath))));
+  const extra = visible.reduce((n, g) => n + g.tracks.length - 1, 0);
+  const bar = `<div class="dup-bar">
+      <button class="btn" data-dupscan ${dup.scanning ? 'disabled' : ''}>${dup.scanning ? 'Scanning…' : groups ? 'Scan again' : 'Find duplicates'}</button>
+      ${groups ? `<span class="muted">${visible.length} groups · ${visible.filter((g) => g.kind === 'identical').length} identical</span>
+        <button class="btn danger" data-dupremove ${extra ? '' : 'disabled'}>Remove ${extra} extra copies…</button>` : ''}
+      <span class="muted">${esc(dup.msg)}</span></div>`;
+  if (!groups) {
+    list.innerHTML = '';
+    $('empty').hidden = false;
+    $('empty').innerHTML = bar + `Finds byte-identical files and the same song stored twice (e.g. MP3 + FLAC, or a YouTube copy).
+      You choose which copy stays; extra copies move to a hidden <code>.duplicates</code> folder in the music root, and their
+      plays and favorites move to the copy you keep. The Mac and iPhone follow on their next sync.`;
+    return;
+  }
+  $('empty').hidden = true;
+  list.style.background = 'none'; list.style.border = '0';
+  list.innerHTML = bar + (visible.length ? '' : '<div class="empty">No duplicates</div>') + visible.map((g) => `
+    <div class="dup-group">
+      <div class="dup-head">${esc(g.tracks[0].title)} <span class="tag ${g.kind}">${g.kind === 'identical' ? 'Identical files' : 'Same song'}</span>
+        <button class="ignore" data-dupignore="${esc(g.id)}">Not duplicates – ignore</button></div>
+      ${g.tracks.map((t) => {
+        const keep = t.relPath === g.keep;
+        return `<div class="dup-row ${keep ? '' : 'remove'}">
+          <button class="keep" data-dupkeep="${esc(g.id)}" data-path="${esc(t.relPath)}" title="${keep ? 'Kept' : 'Will be removed – click to keep this one instead'}">${keep ? '✅' : '🗑'}</button>
+          <div class="info"><div class="p">${esc(t.relPath)}</div>
+            <div class="meta">${esc(artistOf(t))} · ${ext(t.relPath)} · ${t.kbps || '?'} kbps · ${mb(t.size)} · ${fmt(t.duration)} · ${t.playCount || 0} plays${t.favorite ? ' · ♥' : ''}${t.source === 'youtube' ? ' · YouTube' : ''}</div></div>
+          <button class="icon-btn" data-dupplay="${esc(t.relPath)}" title="Preview">▶</button></div>`;
+      }).join('')}
+    </div>`).join('');
+}
+
+async function removeDuplicates() {
+  const q = makeQuery(state.query);
+  const visible = dup.groups.filter((g) => q.empty || g.tracks.some((t) => q.test(state.keys.get(t.relPath) || '')));
+  const plans = visible.map((g) => ({ keep: g.keep, remove: g.tracks.map((t) => t.relPath).filter((p) => p !== g.keep) }));
+  const n = plans.reduce((a, p) => a + p.remove.length, 0);
+  if (!n || !confirm(`Move ${n} extra copies to the .duplicates folder?\n\nPlays and favorites move to the copies you keep. The Mac and iPhone follow on their next sync.`)) return;
+  const res = await (await api('api/duplicates/remove', plans)).json();
+  const ids = new Set(visible.map((g) => g.id));
+  dup.groups = dup.groups.filter((g) => !ids.has(g.id));
+  dup.msg = `Removed ${res.removed} files` + (res.failed.length ? ` · ${res.failed.length} failed: ${res.failed.slice(0, 3).join('; ')}` : '');
+  await loadLibrary();
+}
+
+document.addEventListener('click', (e) => {
+  if (state.view !== 'duplicates') return;
+  if (e.target.closest('[data-dupscan]')) { scanDuplicates(); return; }
+  if (e.target.closest('[data-dupremove]')) { removeDuplicates(); return; }
+  const ig = e.target.closest('[data-dupignore]');
+  if (ig) { dup.groups = dup.groups.filter((g) => g.id !== ig.dataset.dupignore); render(); return; }
+  const k = e.target.closest('[data-dupkeep]');
+  if (k) { const g = dup.groups.find((g) => g.id === k.dataset.dupkeep); if (g) { g.keep = k.dataset.path; render(); } return; }
+  const pl = e.target.closest('[data-dupplay]');
+  if (pl) { const t = state.byPath.get(pl.dataset.dupplay); if (t) play([t]); }
+}, true);
 
 // ---------- favorites
 async function setFavorite(list, fav) {

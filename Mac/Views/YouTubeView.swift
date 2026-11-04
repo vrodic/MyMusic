@@ -12,13 +12,14 @@ struct YouTubeView: View {
     @State private var confirmFavorite = false
     @State private var sortOrder: [KeyPathComparator<YTItem>] = [KeyPathComparator(\.playlistIndex)]
 
-    enum Filter: String, CaseIterable { case all = "All", queued = "Queued", done = "Downloaded", failed = "Failed", skipped = "Skipped" }
+    enum Filter: String, CaseIterable { case all = "All", queued = "Queued", inLibrary = "In Library", done = "Downloaded", failed = "Failed", skipped = "Skipped" }
 
     private var rows: [YTItem] {
         let f: [YTItem]
         switch filter {
         case .all: f = yt.items
-        case .queued: f = yt.items.filter { $0.priority != .skip && ($0.status == .pending || $0.status == .downloading) }
+        case .queued: f = yt.items.filter { $0.priority != .skip && !$0.likelyInLibrary && ($0.status == .pending || $0.status == .downloading) }
+        case .inLibrary: f = yt.items.filter { $0.likelyInLibrary || $0.possibleMatch }
         case .done: f = yt.items.filter { $0.status == .done }
         case .failed: f = yt.items.filter { $0.status == .failed }
         case .skipped: f = yt.items.filter { $0.priority == .skip && $0.status != .done }
@@ -60,25 +61,7 @@ struct YouTubeView: View {
             }
             .id(TableIdentity.of(filter.rawValue, search, "\(sortOrder)"))
             .contextMenu(forSelectionType: YTItem.ID.self) { ids in
-                Menu("Priority") {
-                    ForEach(YTPriority.allCases.reversed()) { p in Button(p.label) { yt.setPriority(ids, p) } }
-                }
-                let picked = rows.filter { ids.contains($0.id) }
-                let allFav = !picked.isEmpty && picked.allSatisfy(model.isFavorite)
-                Button(allFav ? "Remove from Favorites" : "Add to Favorites") { model.setYTFavorite(picked, !allFav) }
-                Divider()
-                Button("Download Now") { yt.downloadNow(rows.filter { ids.contains($0.id) }.map(\.id)) }
-                    .help("Downloads right away, even while paused or throttled")
-                Button("Retry Download") { yt.retry(ids) }
-                if let id = ids.first, let item = yt.items.first(where: { $0.id == id }), let rel = item.relPath,
-                   let t = model.store.track(rel) {
-                    Button("Play") { player.play([t]) }
-                    Button("Show in Finder") { model.revealInFinder(t) }
-                    SyncMenuItem(paths: rows.filter { ids.contains($0.id) }.compactMap(\.relPath))
-                }
-                Button("Open on YouTube") {
-                    if let id = ids.first, let u = URL(string: "https://music.youtube.com/watch?v=\(id)") { NSWorkspace.shared.open(u) }
-                }
+                itemMenu(ids)
             } primaryAction: { ids in
                 // Double-click: play if downloaded, otherwise download it now (ignores pause and throttling).
                 if ids.count == 1, let id = ids.first, let item = yt.items.first(where: { $0.id == id }),
@@ -144,11 +127,53 @@ struct YouTubeView: View {
                 if yt.currentID != nil { ProgressView(value: yt.currentProgress).frame(width: 240) }
             }
             Spacer()
-            Text("\(c[.done] ?? 0) done · \(c[.pending] ?? 0) pending · \(c[.failed] ?? 0) failed").foregroundStyle(.secondary).font(.caption)
+            Text("\(c[.done] ?? 0) done · \(c[.pending] ?? 0) pending · \(yt.items.filter(\.likelyInLibrary).count) in library · \(c[.failed] ?? 0) failed")
+                .foregroundStyle(.secondary).font(.caption)
+            Button { Task { await yt.checkLibraryMatches() } } label: {
+                if yt.isMatching { ProgressView().controlSize(.small) } else { Label("Check Library", systemImage: "rectangle.stack.badge.person.crop") }
+            }
+            .disabled(yt.isMatching)
+            .help("Find liked songs you already have (fuzzy match on artist, title and length); those aren't downloaded")
             Picker("", selection: $filter) { ForEach(Filter.allCases, id: \.self) { Text($0.rawValue) } }
-                .pickerStyle(.segmented).frame(width: 380)
+                .pickerStyle(.segmented).frame(width: 460)
             Button { showLog = true } label: { Image(systemName: "doc.text.magnifyingglass") }.help("Download log")
         }
+    }
+
+
+    /// Right-click menu for liked songs (kept separate so the compiler can type-check the view).
+    @ViewBuilder private func itemMenu(_ ids: Set<YTItem.ID>) -> some View {
+        let rows = self.rows
+            Menu("Priority") {
+                ForEach(YTPriority.allCases.reversed()) { p in Button(p.label) { yt.setPriority(ids, p) } }
+            }
+            let picked = rows.filter { ids.contains($0.id) }
+            let allFav = !picked.isEmpty && picked.allSatisfy(model.isFavorite)
+            Button(allFav ? "Remove from Favorites" : "Add to Favorites") { model.setYTFavorite(picked, !allFav) }
+            Divider()
+            Button("Download Now") { yt.downloadNow(rows.filter { ids.contains($0.id) }.map(\.id)) }
+                .help("Downloads right away, even while paused or throttled")
+            let sel = rows.filter { ids.contains($0.id) }
+            if sel.contains(where: \.likelyInLibrary) {
+                Button("Not in Library – Download It") { yt.downloadAnyway(ids) }
+            }
+            if sel.contains(where: { !$0.likelyInLibrary && $0.status != .done }) {
+                Button("Already in Library – Don't Download") { yt.markInLibrary(ids) }
+            }
+            if let m = sel.first?.libraryMatch, !m.isEmpty, let t = model.store.track(m) {
+                Button("Play Library Match") { player.play([t]) }
+                Button("Show Library Match in Finder") { model.revealInFinder(t) }
+            }
+            Button("Retry Download") { yt.retry(ids) }
+            if let id = ids.first, let item = yt.items.first(where: { $0.id == id }), let rel = item.relPath,
+               let t = model.store.track(rel) {
+                Button("Play") { player.play([t]) }
+                Button("Show in Finder") { model.revealInFinder(t) }
+                SyncMenuItem(paths: rows.filter { ids.contains($0.id) }.compactMap(\.relPath))
+            }
+            Button("Open on YouTube") {
+                if let id = ids.first, let u = URL(string: "https://music.youtube.com/watch?v=\(id)") { NSWorkspace.shared.open(u) }
+            }
     }
 
     // computed only when actually needed (the dialog), not on every redraw
@@ -169,6 +194,14 @@ struct YouTubeView: View {
         .background(.orange.opacity(0.12))
     }
 
+    private func matchHelp(_ i: YTItem) -> String {
+        guard let m = i.libraryMatch, !m.isEmpty else { return "You marked this as already in your library" }
+        let t = model.store.track(m)
+        let pct = Int(((i.matchScore ?? 0) * 100).rounded())
+        return "Looks like \(t.map { "\($0.displayArtist) – \($0.title)" } ?? m) (\(pct)% match)\n\(m)"
+            + (i.likelyInLibrary ? "\nNot downloaded. Right-click → Not in Library to download it." : "\nStill queued; right-click → Already in Library to skip it.")
+    }
+
     @ViewBuilder private func statusView(_ i: YTItem) -> some View {
         switch i.status {
         case .done: Label("Downloaded", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
@@ -177,6 +210,10 @@ struct YouTubeView: View {
         case .failed: Label("Failed (\(i.attempts))", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).help(i.error ?? "")
         case .pending:
             if yt.forcedQueue.contains(i.id) { Label("Up next", systemImage: "arrow.down.circle").foregroundStyle(Color.accentColor) }
+            else if i.likelyInLibrary { Label("In library", systemImage: "checkmark.seal").foregroundStyle(.teal).help(matchHelp(i)) }
+            else if i.possibleMatch {
+                Label(i.priority == .skip ? "Skipped" : "Queued · maybe owned", systemImage: "questionmark.circle").foregroundStyle(.secondary).help(matchHelp(i))
+            }
             else { Text(i.priority == .skip ? "Skipped" : "Queued").foregroundStyle(.secondary) }
         }
     }

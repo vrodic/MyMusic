@@ -21,7 +21,7 @@ enum DuplicateFinder {
         for candidates in bySize {
             var byHash: [String: [Track]] = [:]
             for t in candidates {
-                if let h = fingerprint(root.appendingPathComponent(t.relPath), size: t.size) { byHash[h, default: []].append(t) }
+                if let h = fingerprint(root.appendingFile(t.relPath), size: t.size) { byHash[h, default: []].append(t) }
             }
             for (h, ts) in byHash where ts.count > 1 {
                 let sorted = ts.sorted(by: better)
@@ -127,15 +127,28 @@ enum DuplicateFinder {
 }
 
 extension LibraryDB {
-    /// Move a removed duplicate's stats onto the copy that's kept.
+    /// Move a removed duplicate's stats onto the copy that's kept: the Mac's own counts, every
+    /// device's backed-up counts, the YouTube link, and a merge record for iPhones / web player.
     func mergeStats(from removed: Track, into keep: String) {
-        try? db.execute("""
-            UPDATE tracks SET play_count = play_count + ?, skip_count = skip_count + ?,
-              last_played = MAX(COALESCE(last_played, 0), COALESCE(?, 0)), favorite = MAX(favorite, ?)
-            WHERE rel_path = ?
-            """, [removed.playCount, removed.skipCount, removed.lastPlayed, removed.favorite, keep])
-        try? db.execute("UPDATE device_stats SET rel_path = ? WHERE rel_path = ? AND NOT EXISTS (SELECT 1 FROM device_stats d2 WHERE d2.device_id = device_stats.device_id AND d2.rel_path = ?)",
-                        [keep, removed.relPath, keep])
+        absorbStats(from: removed.relPath, into: keep)
+        moveDeviceStats(from: removed.relPath, to: keep)
         try? db.execute("UPDATE yt_items SET rel_path = ? WHERE rel_path = ?", [keep, removed.relPath])
+        recordMerge(old: removed.relPath, keep: keep)
+    }
+
+    /// Device stats for `old` are added to `keep` (creating the row where a device had none).
+    func moveDeviceStats(from old: String, to keep: String) {
+        try? db.transaction {
+            try db.execute("""
+                UPDATE device_stats SET
+                  play_count = play_count + (SELECT o.play_count FROM device_stats o WHERE o.device_id = device_stats.device_id AND o.rel_path = ?),
+                  skip_count = skip_count + (SELECT o.skip_count FROM device_stats o WHERE o.device_id = device_stats.device_id AND o.rel_path = ?),
+                  favorite = MAX(favorite, (SELECT o.favorite FROM device_stats o WHERE o.device_id = device_stats.device_id AND o.rel_path = ?))
+                WHERE rel_path = ? AND EXISTS (SELECT 1 FROM device_stats o WHERE o.device_id = device_stats.device_id AND o.rel_path = ?)
+                """, [old, old, old, keep, old])
+            try db.execute("UPDATE device_stats SET rel_path = ? WHERE rel_path = ? AND NOT EXISTS (SELECT 1 FROM device_stats k WHERE k.device_id = device_stats.device_id AND k.rel_path = ?)",
+                           [keep, old, keep])
+            try db.execute("DELETE FROM device_stats WHERE rel_path = ?", [old])
+        }
     }
 }

@@ -28,8 +28,14 @@ struct YTItem: Identifiable, Hashable {
     var attempts: Int
     var inPlaylist: Bool
     var favorite: Bool = false
+    var libraryMatch: String?       // relPath of the library song it matches
+    var matchScore: Double?
+    var matchOverride = false       // you said: download it anyway
     var favoriteSort: Int { favorite ? 1 : 0 }
     var id: String { videoID }
+    /// Probably already in the library, so it won't be downloaded (unless you override).
+    var likelyInLibrary: Bool { !matchOverride && status != .done && (matchScore ?? 0) >= YTLibraryMatcher.likelyThreshold }
+    var possibleMatch: Bool { !likelyInLibrary && status != .done && (matchScore ?? 0) >= YTLibraryMatcher.possibleThreshold }
 }
 
 struct DeviceStatTotal: Hashable { var relPath: String; var plays: Int; var favorite: Bool }
@@ -56,7 +62,27 @@ extension LibraryDB {
         "ALTER TABLE yt_items ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0",
         // v5
         LibraryDB.favoriteAtMigration,
+        // v6: duplicates removed (here or on the web player), so iPhones/web can move their stats too
+        "CREATE TABLE merged_paths (old TEXT PRIMARY KEY, keep TEXT NOT NULL, merged_at REAL NOT NULL)",
+        // v7: liked songs that look like they're already in the library (fuzzy match), and your override
+        "ALTER TABLE yt_items ADD COLUMN library_match TEXT; ALTER TABLE yt_items ADD COLUMN match_score REAL; ALTER TABLE yt_items ADD COLUMN match_override INTEGER NOT NULL DEFAULT 0;",
     ]
+
+    func recordMerge(old: String, keep: String) {
+        try? db.execute("INSERT INTO merged_paths (old, keep, merged_at) VALUES (?,?,?) ON CONFLICT(old) DO UPDATE SET keep = excluded.keep, merged_at = excluded.merged_at",
+                        [old, keep, Date().timeIntervalSince1970])
+        // anything that was merged into `old` earlier now points at `keep`
+        try? db.execute("UPDATE merged_paths SET keep = ? WHERE keep = ?", [keep, old])
+    }
+
+    /// Merges from the last 90 days (old → keep), sent along with the library.
+    func recentMerges() -> [String: String] {
+        let since = Date().timeIntervalSince1970 - 90 * 86400
+        let rows = (try? db.query("SELECT old, keep FROM merged_paths WHERE merged_at > ?", [since])) ?? []
+        var out: [String: String] = [:]
+        for r in rows { if let o = r.string("old"), let k = r.string("keep") { out[o] = k } }
+        return out
+    }
 
     // MARK: YouTube
 
@@ -85,7 +111,8 @@ extension LibraryDB {
                    priority: YTPriority(rawValue: $0.int("priority") ?? 1) ?? .normal,
                    status: YTStatus(rawValue: $0.string("status") ?? "") ?? .pending,
                    relPath: $0.string("rel_path"), error: $0.string("error"), attempts: $0.int("attempts") ?? 0,
-                   inPlaylist: $0.bool("in_playlist"), favorite: $0.bool("favorite"))
+                   inPlaylist: $0.bool("in_playlist"), favorite: $0.bool("favorite"),
+                   libraryMatch: $0.string("library_match"), matchScore: $0.double("match_score"), matchOverride: $0.bool("match_override"))
         }
     }
 
@@ -119,8 +146,26 @@ extension LibraryDB {
 
     func resetStuckDownloads() { try? db.execute("UPDATE yt_items SET status='pending' WHERE status='downloading'") }
 
+    /// Store fuzzy-match results (nil = no match). Only for songs not downloaded yet.
+    func setYTLibraryMatches(_ results: [String: YTLibraryMatcher.Match?]) {
+        try? db.transaction {
+            for (id, m) in results {
+                try db.execute("UPDATE yt_items SET library_match = ?, match_score = ? WHERE video_id = ?", [m?.relPath, m?.score, id])
+            }
+        }
+    }
+
+    func setYTMatchOverride(_ ids: [String], _ on: Bool) {
+        try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET match_override = ? WHERE video_id = ?", [on, id]) } }
+    }
+
+    /// "It's in my library": mark by hand (score 1, no automatic re-check overrides that).
+    func markYTInLibrary(_ ids: [String]) {
+        try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET match_score = 1.0, match_override = 0, library_match = '' WHERE video_id = ?", [id]) } }
+    }
+
     func nextYTDownload(maxAttempts: Int = 3) -> YTItem? {
-        ytItems().filter { $0.priority != .skip && ($0.status == .pending || ($0.status == .failed && $0.attempts < maxAttempts)) }
+        ytItems().filter { $0.priority != .skip && !$0.likelyInLibrary && ($0.status == .pending || ($0.status == .failed && $0.attempts < maxAttempts)) }
             .sorted { ($0.priority.rawValue, -$0.playlistIndex, -$0.attempts) > ($1.priority.rawValue, -$1.playlistIndex, -$1.attempts) }
             .first
     }
