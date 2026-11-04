@@ -261,7 +261,10 @@ final class AppModel: ObservableObject {
         loadUser()
         peers = PeerSync(model: self)
         backend.onSyncApplied = { [weak self] res in Task { @MainActor in self?.afterSyncApplied(res) } }
-        if musicRoot != nil { Task { await rescan() } }
+        if musicRoot != nil {
+            player.restoreState(lookup: store.track)   // pick up where you left off
+            Task { await rescan() }
+        }
     }
 
     private func refreshOnline() {

@@ -56,6 +56,7 @@ final class IOSModel: ObservableObject {
         }
         browser.start()
         loadUser()
+        player.restoreState(lookup: store.track)   // pick up where you left off
         Task { await scanLocal() }
     }
 

@@ -35,7 +35,7 @@ final class PlayerEngine: ObservableObject {
     var currentTime: Double { clock.time }
     @Published private(set) var duration: Double = 0
     @Published private(set) var artwork: PlatformImage?
-    @Published var shuffle = false { didSet { applyShuffle() } }
+    @Published var shuffle = false { didSet { if !restoring { applyShuffle() } } }
     @Published var repeatMode: RepeatMode = .off
     @Published var volume: Float = 1 { didSet { player.volume = volume } }
 
@@ -65,6 +65,17 @@ final class PlayerEngine: ObservableObject {
                 }
             }
         setupRemoteCommands()
+        // save the spot when the app quits or leaves the screen
+        #if os(macOS)
+        let names = [NSApplication.willTerminateNotification]
+        #else
+        let names = [UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification]
+        #endif
+        for n in names {
+            NotificationCenter.default.addObserver(forName: n, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.saveState() }
+            }
+        }
     }
 
     // MARK: queue control
@@ -110,11 +121,11 @@ final class PlayerEngine: ObservableObject {
 
     func togglePlay() { isPlaying ? pause() : resume() }
 
-    func pause() { player.pause(); isPlaying = false; updateNowPlaying() }
+    func pause() { player.pause(); isPlaying = false; updateNowPlaying(); saveState() }
 
     func resume() {
         if player.currentItem == nil { load(autoplay: true); return }
-        activateSession(); player.play(); isPlaying = true; updateNowPlaying()
+        activateSession(); player.play(); isPlaying = true; updateNowPlaying(); saveState()
     }
 
     func next() {
@@ -140,6 +151,62 @@ final class PlayerEngine: ObservableObject {
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
         isPlaying = false; clock.time = 0; duration = 0; artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        saveState()
+    }
+
+    // MARK: remembering where you were (queue, song, position, playing or paused)
+
+    private struct SavedState: Codable {
+        var queue: [String]
+        var original: [String]
+        var index: Int
+        var time: Double
+        var playing: Bool
+        var counted: Bool
+        var shuffle: Bool
+        var repeatMode: String
+    }
+
+    private static let stateKey = "player.state"
+    private var restoring = false
+    private var pendingSeek: Double?
+    private var statusObservation: NSKeyValueObservation?
+    private var lastSavedTime = -100.0
+
+    /// Saved on every play / pause / song change, every few seconds while playing, and when the
+    /// app quits or goes to the background.
+    func saveState() {
+        guard !restoring else { return }
+        guard !queue.isEmpty, queue.indices.contains(index) else {
+            UserDefaults.standard.removeObject(forKey: Self.stateKey); return
+        }
+        // keep a window around the current song for very long queues
+        let lo = max(0, index - 1000), hi = min(queue.count, index + 4000)
+        let st = SavedState(queue: queue[lo..<hi].map(\.relPath), original: shuffle ? originalQueue.prefix(5000).map(\.relPath) : [],
+                            index: index - lo, time: currentTime, playing: isPlaying, counted: counted,
+                            shuffle: shuffle, repeatMode: repeatMode.rawValue)
+        UserDefaults.standard.set(try? JSONEncoder().encode(st), forKey: Self.stateKey)
+        lastSavedTime = currentTime
+    }
+
+    /// Bring back the last session: if it was playing, carry on from the same spot; if it was
+    /// paused, load that song paused at its position. `lookup` finds songs by path (gone ones are skipped).
+    func restoreState(lookup: (String) -> Track?) {
+        guard let data = UserDefaults.standard.data(forKey: Self.stateKey),
+              let st = try? JSONDecoder().decode(SavedState.self, from: data),
+              st.queue.indices.contains(st.index), let cur = lookup(st.queue[st.index]) else { return }
+        restoring = true
+        let list = st.queue.compactMap(lookup)
+        queue = list
+        index = list.firstIndex { $0.relPath == cur.relPath } ?? 0
+        originalQueue = st.original.isEmpty ? list : st.original.compactMap(lookup)
+        shuffle = st.shuffle
+        repeatMode = RepeatMode(rawValue: st.repeatMode) ?? .off
+        load(autoplay: st.playing)
+        counted = st.counted                 // don't count the song a second time
+        if st.time > 1 { seekWhenReady(st.time) }
+        restoring = false
+        saveState()
     }
 
     /// Update a track in the queue (e.g. favorite toggled) without interrupting playback.
@@ -166,15 +233,34 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
+    /// Seek once the song is ready to play (a seek on a file still opening can be ignored).
+    private func seekWhenReady(_ t: Double) {
+        clock.time = t
+        guard let item = player.currentItem else { return }
+        if item.status == .readyToPlay { seek(to: t); return }
+        pendingSeek = t
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .readyToPlay else { return }
+            Task { @MainActor in
+                guard let self, let t = self.pendingSeek, self.player.currentItem === item else { return }
+                self.pendingSeek = nil
+                self.statusObservation = nil
+                self.seek(to: t)
+            }
+        }
+    }
+
     private func load(autoplay: Bool) {
         guard let t = current else { return }
         counted = false
         clock.time = 0
+        pendingSeek = nil; statusObservation = nil
         duration = t.duration ?? 0
         player.replaceCurrentItem(with: AVPlayerItem(url: urlFor(t)))
         artwork = nil
         if autoplay { activateSession(); player.play(); isPlaying = true }
         updateNowPlaying()
+        saveState()
         let url = urlFor(t)
         Task { [weak self] in
             let data = await AudioScanner.artwork(url: url)
@@ -185,8 +271,9 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func tick(_ t: Double) {
-        guard t.isFinite else { return }
+        guard t.isFinite, pendingSeek == nil else { return }
         clock.time = t
+        if isPlaying, abs(t - lastSavedTime) >= 5 { saveState() }
         // assign only when it changes: every @Published write redraws all observers
         if let d = player.currentItem?.duration.seconds, d.isFinite, d > 0, abs(d - duration) > 0.01 { duration = d }
         if !counted, duration > 0, t >= min(duration * 0.5, 240), let cur = current {
