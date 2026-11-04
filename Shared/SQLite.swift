@@ -154,6 +154,27 @@ final class SQLiteDB: @unchecked Sendable {
         }
     }
 
+    /// Consistent copy of the whole database to `path` (safe while the app is using it).
+    func snapshot(to path: String) throws {
+        try? FileManager.default.removeItem(atPath: path)
+        try execute("VACUUM INTO '\(path.replacingOccurrences(of: "'", with: "''"))'")
+    }
+
+    /// Replace this database's contents with the database file at `path` (SQLite online backup).
+    func restore(from path: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        var src: OpaquePointer?
+        guard sqlite3_open_v2(path, &src, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            sqlite3_close(src)
+            throw SQLiteError(message: "cannot open backup \(path)")
+        }
+        defer { sqlite3_close(src) }
+        guard let b = sqlite3_backup_init(db, "main", src, "main") else { throw SQLiteError(message: errorMessage) }
+        let rc = sqlite3_backup_step(b, -1)
+        sqlite3_backup_finish(b)
+        guard rc == SQLITE_DONE else { throw SQLiteError(message: "restore failed: \(errorMessage)") }
+    }
+
     /// Lightweight migrations keyed by PRAGMA user_version.
     func migrate(_ steps: [String]) throws {
         let current = scalarInt("PRAGMA user_version")

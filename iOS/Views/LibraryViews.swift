@@ -21,6 +21,7 @@ struct LibraryHome: View {
                 NavigationLink { TrackListView(title: "Recently Added", tracks: store.recentlyAdded) } label: { Label("Recently Added", systemImage: "plus.circle") }
                 NavigationLink { TrackListView(title: "YouTube", tracks: store.tracks.filter { $0.source == .youtube }) } label: { Label("YouTube Likes", systemImage: "play.rectangle") }
             }
+            ServerSection()
             Section {
                 let d = store.tracks.reduce(0.0) { $0 + ($1.duration ?? 0) }
                 Text("\(store.tracks.count) songs · \(store.artists.count) artists · \(Int(d / 3600)) h · \(ByteCountFormatter.string(fromByteCount: model.storageUsed(), countStyle: .file))")
@@ -36,7 +37,8 @@ struct LibraryHome: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: [.folder, .audio], allowsMultipleSelection: true) { r in
             if case .success(let urls) = r { Task { await model.importItems(urls) } }
         }
-        .refreshable { await model.scanLocal() }
+        .refreshable { await model.scanLocal(); await model.web.refresh(force: true) }
+        .task { await model.web.refresh() }
         .overlay(alignment: .top) {
             if model.isScanning { ProgressView().padding(6).background(.thinMaterial, in: Capsule()) }
         }

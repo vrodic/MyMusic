@@ -249,16 +249,31 @@ final class AppModel: ObservableObject {
         panel.prompt = "Use as Music Root"
         panel.message = "Pick the root folder of your music collection. YouTube downloads go to <root>/yt."
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await setRoot(url) }
+    }
+
+    /// Use `url` as the music root: save it, point the server at it, and scan.
+    func setRoot(_ url: URL) async {
         musicRoot = url
         UserDefaults.standard.set(url.path, forKey: "musicRoot")
         pushBackend()
         checkRemote()
-        Task {
-            await rescan()
-            if selection.paths.isEmpty {
-                selection = FolderSelection(paths: Set(store.folderRoot.subfolders.map(\.path)))
-            }
+        await rescan()
+        if selection.paths.isEmpty && !syncFavorites {
+            selection = FolderSelection(paths: Set(store.folderRoot.subfolders.map(\.path)))
         }
+    }
+
+    /// Replace this Mac's library with a backup (first-time setup from the web player): songs,
+    /// play counts, iPhone backups, favorites, the YouTube queue and sync settings.
+    func restoreLibrary(from path: String) throws {
+        try db.restore(from: path)
+        db.restoreSettingsFromBackup()
+        selection = (UserDefaults.standard.data(forKey: "syncSelection")).flatMap { try? JSONDecoder().decode(FolderSelection.self, from: $0) } ?? FolderSelection()
+        syncFavorites = UserDefaults.standard.bool(forKey: "syncFavorites")
+        devices = db.deviceBackups()
+        yt.reload()
+        store.reload()
     }
 
     func rescan() async {

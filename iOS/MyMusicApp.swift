@@ -13,10 +13,11 @@ struct MyMusicApp: App {
                 .environmentObject(model.player)
                 .environmentObject(model.browser)
                 .environmentObject(model.sync)
+                .environmentObject(model.web)
                 .onOpenURL { url in Task { await model.importItems([url]) } }
                 .onChange(of: phase) { _, p in
                     if p == .active {
-                        Task { await model.scanLocal() }
+                        Task { await model.scanLocal(); await model.web.refresh() }
                         model.sync.startListening(browser: model.browser)
                     } else if p == .background && !model.player.isPlaying && !model.sync.isSyncing {
                         // iOS suspends us anyway; reconnect when we come back

@@ -7,7 +7,8 @@ Description=MyMusic web player (peer of the MyMusic Mac app)
 After=network-online.target
 
 [Service]
-# MYMUSIC_TOKEN (shared secret for the Mac's sync) and other settings, kept private (chmod 600)
+# MYMUSIC_TOKEN (shared secret for the Mac's sync), MYMUSIC_SMB_URL (smb://host/share/path, for
+# setting up a new Mac) and other settings, kept private (chmod 600)
 EnvironmentFile=-%h/.config/mymusic-web.env
 ExecStart=%h/.local/bin/mymusic-web -music /mnt/picko/stuff/mp3 -db %h/.local/share/mymusic-web/mymusic-web.sqlite -listen :47824
 Restart=on-failure

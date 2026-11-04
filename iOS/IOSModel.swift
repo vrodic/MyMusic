@@ -9,6 +9,7 @@ final class IOSModel: ObservableObject {
     let player: PlayerEngine
     let browser = ServerBrowser()
     lazy var sync = SyncManager(model: self)
+    lazy var web = WebLibrary(model: self)
 
     @AppStorage("deviceID") var deviceID = UUID().uuidString
     @AppStorage("deviceName") var deviceName = "iPhone"
@@ -29,9 +30,19 @@ final class IOSModel: ObservableObject {
         db = try! LibraryDB(path: Self.supportDir.appendingPathComponent("library.sqlite").path,
                             extraMigrations: [LibraryDB.favoriteAtMigration])
         store = LibraryStore(db: db)
-        player = PlayerEngine(urlFor: { IOSModel.musicDir.appendingFile($0.relPath) })
-        player.onPlayCounted = { [weak self] t in self?.store.recordPlay(t) }
-        player.onSkipped = { [weak self] t in self?.store.recordSkip(t) }
+        var webRef: (() -> WebLibrary?) = { nil }
+        player = PlayerEngine(urlFor: { t in
+            // songs not on the phone stream from the web player
+            if t.origin == .remote, let web = webRef() { return MainActor.assumeIsolated { web.streamURL(t) } }
+            return IOSModel.musicDir.appendingFile(t.relPath)
+        })
+        webRef = { [weak self] in self?.web }
+        player.onPlayCounted = { [weak self] t in
+            if t.origin == .remote { self?.web.reportPlay(t) } else { self?.store.recordPlay(t) }
+        }
+        player.onSkipped = { [weak self] t in
+            if t.origin == .remote { self?.web.reportSkip(t) } else { self?.store.recordSkip(t) }
+        }
         browser.start()
         Task { await scanLocal() }
     }
@@ -56,6 +67,7 @@ final class IOSModel: ObservableObject {
     }
 
     func toggleFavorite(_ t: Track) {
+        if t.origin == .remote { web.setFavorite(t, !t.favorite); var u = t; u.favorite.toggle(); player.refresh(u); return }
         let u = store.toggleFavorite(store.track(t.relPath) ?? t)
         player.refresh(u)
     }

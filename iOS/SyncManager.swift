@@ -140,7 +140,20 @@ final class SyncManager: ObservableObject {
             return
         }
 
-        let local = Dictionary(uniqueKeysWithValues: model.db.allTracks().map { ($0.relPath, $0) })
+        var localRows = model.db.allTracks()
+        let byKey = Dictionary(localRows.map { (WebLibrary.key($0.relPath), $0) }, uniquingKeysWith: { a, _ in a })
+        let localPaths = Set(localRows.map(\.relPath))
+        var adopted = 0
+        for t in manifest.tracks where !localPaths.contains(t.relPath) {
+            if let same = byKey[WebLibrary.key(t.relPath)], same.relPath != t.relPath {
+                // same file (APFS ignores the accent encoding): use the Mac's spelling; a song you
+                // downloaded from the web player stays yours (not removed if the Mac drops it)
+                model.db.renamePath(same.relPath, to: t.relPath, origin: same.origin == .web ? .web : .server)
+                adopted += 1
+            }
+        }
+        if adopted > 0 { localRows = model.db.allTracks() }
+        let local = Dictionary(uniqueKeysWithValues: localRows.map { ($0.relPath, $0) })
         let fm = FileManager.default
         let todo = manifest.tracks.filter { t in
             guard let l = local[t.relPath], fm.fileExists(atPath: model.url(for: l).path) else { return true }

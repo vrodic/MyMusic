@@ -49,6 +49,18 @@ journalctl -u mymusic-web -f             # watch the first scan
 Then open `http://192.168.100.7:47824`, and on the Mac set **Sync & Devices → Web player** to that
 address. If you set `MYMUSIC_TOKEN` in the service, enter the same token there.
 
+## Found on the network
+
+The web player announces itself over Bonjour (`_mymusic-web._tcp`):
+* **iPhone** → Library tab → *On \<server\> → Not on iPhone*: songs on the server that aren't on the
+  phone, by folder, with search. Tap to stream; swipe / long-press to download (one song, a folder,
+  or everything listed). Downloads stay on the phone even if they're not in the Mac's sync selection.
+  Plays and favorites of streamed songs are recorded here and reach the Mac on its next sync.
+* **A new Mac**: the first-run screen offers *Set Up from \<server\>*. It mounts the music share
+  (`MYMUSIC_SMB_URL`; macOS asks for the username and password) and restores the main Mac's library
+  — play counts, favorites, iPhone backups, YouTube queue and sync settings — from the copy the main
+  Mac uploads here every 30 minutes (`mac-library-backup.sqlite`, next to the database).
+
 ## Flags
 | flag | env | default | |
 |---|---|---|---|
@@ -57,6 +69,7 @@ address. If you set `MYMUSIC_TOKEN` in the service, enter the same token there.
 | `-listen` | `MYMUSIC_LISTEN` | `:47824` | |
 | `-token` | `MYMUSIC_TOKEN` | none | shared secret for the Mac's peer sync |
 | `-scan-every` | | `6h` | re-scan interval (`0` = only at start) |
+| `-smb` | `MYMUSIC_SMB_URL` | none | how Macs reach the music over SMB: `smb://host/share/path/to/music` (for new-Mac setup) |
 
 The browser endpoints have no login, like the Mac's iPhone sync server: it's meant for your home network.
 

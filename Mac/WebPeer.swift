@@ -122,9 +122,29 @@ final class WebPeer: ObservableObject {
                 + (removedHere > 0 ? " · \(removedHere) duplicates removed on the web" : "")
             lastSync = Date()
             lastError = nil
+            await uploadBackupIfDue()
         } catch {
             lastError = (error as? URLError)?.code == .cannotConnectToHost || (error as? URLError)?.code == .timedOut
                 ? "Web player is offline" : error.localizedDescription
+        }
+    }
+
+    // MARK: library backup on the web player (lets a new Mac start from this library)
+
+    @AppStorage("web.lastBackupUpload") private var lastBackupUpload: Double = 0
+
+    private func uploadBackupIfDue() async {
+        guard Date().timeIntervalSince1970 - lastBackupUpload > 30 * 60, var req = request("api/peer/backup") else { return }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("mymusic-backup-\(UUID().uuidString).sqlite").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let db = model.db
+        db.saveSettingsForBackup()
+        let ok = await offMain { (try? db.db.snapshot(to: path)) != nil }
+        guard ok, let data = FileManager.default.contents(atPath: path) else { return }
+        req.httpMethod = "POST"
+        req.setValue("application/vnd.sqlite3", forHTTPHeaderField: "Content-Type")
+        if let (rdata, resp) = try? await session.upload(for: req, from: data), (try? check(resp, rdata)) != nil {
+            lastBackupUpload = Date().timeIntervalSince1970
         }
     }
 

@@ -31,9 +31,19 @@ final class LibraryDB: @unchecked Sendable {
     /// to its own migration list, because migration numbers differ per app.
     static let favoriteAtMigration = "ALTER TABLE tracks ADD COLUMN favorite_at REAL"
 
+    private let migrations: [String]
+
     init(path: String, extraMigrations: [String] = []) throws {
         db = try SQLiteDB(path: path)
-        try db.migrate(Self.baseMigrations + extraMigrations)
+        migrations = Self.baseMigrations + extraMigrations
+        try db.migrate(migrations)
+    }
+
+    /// Replace everything with a database copy (e.g. restoring a Mac from the web player),
+    /// then bring it up to this app's schema.
+    func restore(from path: String) throws {
+        try db.restore(from: path)
+        try db.migrate(migrations)
     }
 
     // MARK: reading
@@ -91,6 +101,11 @@ final class LibraryDB: @unchecked Sendable {
                           t.duration, t.genre, t.year, t.source.rawValue, t.origin.rawValue, t.addedAt])
             }
         }
+    }
+
+    /// Re-key a song (same file, different spelling of its path, e.g. accent encoding).
+    func renamePath(_ old: String, to new: String, origin: TrackOrigin) {
+        try? db.execute("UPDATE tracks SET rel_path = ?, origin = ? WHERE rel_path = ?", [new, origin.rawValue, old])
     }
 
     func delete(_ relPaths: [String]) throws {

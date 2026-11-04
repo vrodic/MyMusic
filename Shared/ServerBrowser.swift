@@ -7,16 +7,20 @@ struct DiscoveredServer: Identifiable, Hashable {
     var id: String { name }
 }
 
-/// Finds Macs advertising `_mymusic._tcp` and resolves them to an http base URL.
+/// Finds services on the local network (Macs: `_mymusic._tcp`, web players: `_mymusic-web._tcp`)
+/// and resolves them to an http base URL.
 @MainActor
 final class ServerBrowser: ObservableObject {
     @Published private(set) var servers: [DiscoveredServer] = []
     @Published private(set) var state = "Searching…"
     private var browser: NWBrowser?
+    let type: String
+
+    init(type: String = MyMusicService.bonjourType) { self.type = type }
 
     func start() {
         browser?.cancel()
-        let b = NWBrowser(for: .bonjour(type: MyMusicService.bonjourType, domain: nil), using: .tcp)
+        let b = NWBrowser(for: .bonjour(type: type, domain: nil), using: .tcp)
         b.stateUpdateHandler = { [weak self] s in
             Task { @MainActor in
                 switch s {

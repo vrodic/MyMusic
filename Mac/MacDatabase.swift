@@ -66,7 +66,35 @@ extension LibraryDB {
         "CREATE TABLE merged_paths (old TEXT PRIMARY KEY, keep TEXT NOT NULL, merged_at REAL NOT NULL)",
         // v7: liked songs that look like they're already in the library (fuzzy match), and your override
         "ALTER TABLE yt_items ADD COLUMN library_match TEXT; ALTER TABLE yt_items ADD COLUMN match_score REAL; ALTER TABLE yt_items ADD COLUMN match_override INTEGER NOT NULL DEFAULT 0;",
+        // v8: app settings stored with the library, so a backup restores them too
+        "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     ]
+
+    /// UserDefaults keys that travel with a library backup (not machine-specific ones like the music root).
+    static let backedUpSettings = ["syncSelection", "syncFavorites", "yt.playlistURL", "yt.cookiesBrowser", "yt.defaultPriority",
+                                   "yt.autoRefreshHours", "yt.delaySeconds", "yt.maxPerHour", "yt.maxPerDay", "yt.rateLimit",
+                                   "yt.sleepRequests", "yt.cooldownHours", "server.name"]
+
+    func saveSettingsForBackup() {
+        let d = UserDefaults.standard
+        try? db.transaction {
+            for k in Self.backedUpSettings {
+                guard let v = d.object(forKey: k) else { continue }
+                let data = try PropertyListSerialization.data(fromPropertyList: v, format: .xml, options: 0)
+                try db.execute("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                               [k, String(decoding: data, as: UTF8.self)])
+            }
+        }
+    }
+
+    func restoreSettingsFromBackup() {
+        let rows = (try? db.query("SELECT key, value FROM app_settings")) ?? []
+        for r in rows {
+            guard let k = r.string("key"), Self.backedUpSettings.contains(k), let v = r.string("value"),
+                  let obj = try? PropertyListSerialization.propertyList(from: Data(v.utf8), format: nil) else { continue }
+            UserDefaults.standard.set(obj, forKey: k)
+        }
+    }
 
     func recordMerge(old: String, keep: String) {
         try? db.execute("INSERT INTO merged_paths (old, keep, merged_at) VALUES (?,?,?) ON CONFLICT(old) DO UPDATE SET keep = excluded.keep, merged_at = excluded.merged_at",

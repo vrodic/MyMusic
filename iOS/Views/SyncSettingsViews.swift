@@ -84,6 +84,8 @@ struct SettingsView: View {
                 TextField("Manual Mac address (e.g. 192.168.1.10:47823)", text: $model.manualServer)
                     .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Toggle("Remove songs deleted on the Mac", isOn: $model.removeDeleted)
+                TextField("Web player address (blank = find automatically)", text: $model.web.manualAddress)
+                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
             } header: { Text("Sync") } footer: { Text("Only songs that came from the Mac are ever removed. Files you import stay.") }
 
             Section {

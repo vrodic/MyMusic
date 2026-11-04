@@ -27,7 +27,7 @@
 	<key>UISupportsDocumentBrowser</key><false/>
 	<!-- Local network discovery of the Mac -->
 	<key>NSLocalNetworkUsageDescription</key><string>MyMusic finds your Mac on the local network to sync your music.</string>
-	<key>NSBonjourServices</key><array><string>_mymusic._tcp</string></array>
+	<key>NSBonjourServices</key><array><string>_mymusic._tcp</string><string>_mymusic-web._tcp</string></array>
 	<key>NSAppTransportSecurity</key>
 	<dict><key>NSAllowsArbitraryLoads</key><true/><key>NSAllowsLocalNetworking</key><true/></dict>
 	<!-- Open audio files shared from other apps -->

@@ -2,14 +2,18 @@ import Foundation
 
 enum MyMusicService {
     static let bonjourType = "_mymusic._tcp"
+    /// The Go web player (web/) on the music server.
+    static let webBonjourType = "_mymusic-web._tcp"
     static let defaultPort: UInt16 = 47823
     static let apiVersion = 1
     static let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aif", "aiff", "caf", "alac", "m4b", "mp4"]
 }
 
 enum TrackSource: String, Codable { case local, youtube }
-/// Where a file on the device came from (iOS only distinguishes Mac-synced vs. user-imported).
-enum TrackOrigin: String, Codable { case server, imported }
+/// Where a file on the device came from.
+/// server = synced from the Mac · imported = added on the phone · web = downloaded from the web
+/// player (kept until removed) · remote = not on the phone, streamed from the web player.
+enum TrackOrigin: String, Codable { case server, imported, web, remote }
 
 struct Track: Codable, Hashable, Identifiable {
     var relPath: String
@@ -94,6 +98,17 @@ struct SyncProgress: Codable, Hashable {
 
 /// Reply to the iPhone's long-poll (GET /api/events).
 struct DeviceEvents: Codable { var commands: [String] }
+
+/// GET /api/info from the web player.
+struct WebPlayerInfo: Codable, Hashable {
+    var name: String
+    var trackCount: Int
+    var smbURL: String?
+    var tokenRequired: Bool?
+    var macBackupAt: String?
+    var lastMacSync: String?
+    var macName: String?
+}
 
 struct DeviceBackup: Codable, Identifiable, Hashable {
     var deviceID: String

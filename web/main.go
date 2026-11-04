@@ -29,11 +29,13 @@ import (
 var staticFiles embed.FS
 
 type server struct {
-	db       *DB
-	root     string
-	token    string
-	name     string
-	scanning sync.Mutex
+	db         *DB
+	root       string
+	token      string
+	name       string
+	smbURL     string
+	backupPath string // latest copy of the Mac's library database (for setting up a new Mac)
+	scanning   sync.Mutex
 }
 
 func main() {
@@ -42,6 +44,7 @@ func main() {
 	listen := flag.String("listen", envOr("MYMUSIC_LISTEN", ":47824"), "listen address")
 	token := flag.String("token", envOr("MYMUSIC_TOKEN", ""), "shared secret the Mac must send for peer sync (optional)")
 	scanEvery := flag.Duration("scan-every", 6*time.Hour, "re-scan the music folder this often (0 = only at start)")
+	smbURL := flag.String("smb", envOr("MYMUSIC_SMB_URL", ""), "how Macs reach this music folder over SMB, e.g. smb://192.168.100.7/root/mnt/picko/stuff/mp3 (share + path); used to set up a new Mac")
 	flag.Parse()
 	if *musicDir == "" {
 		log.Fatal("-music is required (e.g. -music /mnt/picko/stuff/mp3)")
@@ -58,7 +61,7 @@ func main() {
 		clockOffset.Store(v) // last known correction, until the Mac syncs again
 	}
 	host, _ := os.Hostname()
-	s := &server{db: db, root: root, token: *token, name: host}
+	s := &server{db: db, root: root, token: *token, name: host, smbURL: *smbURL, backupPath: filepath.Join(filepath.Dir(*dbPath), "mac-library-backup.sqlite")}
 
 	go func() {
 		for {
@@ -89,7 +92,11 @@ func main() {
 	mux.HandleFunc("GET /api/peer/removals", s.peerOnly(s.peerRemovals))
 	mux.HandleFunc("POST /api/peer/removals/ack", s.peerOnly(s.peerAckRemovals))
 
+	mux.HandleFunc("GET /api/peer/backup", s.peerOnly(s.getBackup))
+	mux.HandleFunc("POST /api/peer/backup", s.peerOnly(s.putBackup))
+
 	log.Printf("mymusic-web: music %s, database %s, listening on %s", root, *dbPath, *listen)
+	go advertise(s, *listen)
 	log.Fatal(http.ListenAndServe(*listen, logRequests(mux)))
 }
 
@@ -111,6 +118,7 @@ func (s *server) info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, map[string]any{
 		"name": s.name, "trackCount": len(ts),
 		"lastMacSync": s.db.Meta("lastMacSync"), "macName": s.db.Meta("macName"), "lastScan": s.db.Meta("lastScan"),
+		"smbURL": s.smbURL, "tokenRequired": s.token != "", "macBackupAt": s.db.Meta("macBackupAt"),
 	})
 }
 
@@ -362,6 +370,44 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
+}
+
+// MARK: Mac library backup
+
+// The Mac uploads a copy of its library database every so often; a new Mac can restore it.
+func (s *server) putBackup(w http.ResponseWriter, r *http.Request) {
+	tmp := s.backupPath + ".upload"
+	f, err := os.Create(tmp)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	n, err := io.Copy(f, io.LimitReader(r.Body, 512<<20))
+	f.Close()
+	if err != nil || n < 4096 {
+		os.Remove(tmp)
+		http.Error(w, "upload failed", 400)
+		return
+	}
+	if err := os.Rename(tmp, s.backupPath); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	s.db.SetMeta("macBackupAt", time.Now().Format(time.RFC3339))
+	log.Printf("peer: stored Mac library backup (%d KB)", n/1024)
+	writeJSON(w, r, map[string]bool{"ok": true})
+}
+
+func (s *server) getBackup(w http.ResponseWriter, r *http.Request) {
+	f, err := os.Open(s.backupPath)
+	if err != nil {
+		http.Error(w, "no backup yet", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+	w.Header().Set("Content-Type", "application/vnd.sqlite3")
+	http.ServeContent(w, r, "library.sqlite", st.ModTime(), f)
 }
 
 // MARK: helpers

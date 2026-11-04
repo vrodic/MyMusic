@@ -85,13 +85,7 @@ struct ContentView: View {
         } detail: {
             Group {
                 if model.musicRoot == nil {
-                    ContentUnavailableView {
-                        Label("Choose your music folder", systemImage: "folder.badge.plus")
-                    } description: {
-                        Text("MyMusic indexes everything under the root folder. YouTube downloads go into <root>/yt.")
-                    } actions: {
-                        Button("Choose Music Root…") { model.chooseRoot() }.buttonStyle(.borderedProminent)
-                    }
+                    WelcomeView()
                 } else {
                     detail
                 }
