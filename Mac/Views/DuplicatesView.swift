@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DuplicatesView: View {
+    var search: String = ""
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var player: PlayerEngine
     @State private var groups: [DuplicateGroup] = []
@@ -11,7 +12,11 @@ struct DuplicatesView: View {
     @State private var confirm = false
     @State private var result: String?
 
-    private var visible: [DuplicateGroup] { filter.map { k in groups.filter { $0.kind == k } } ?? groups }
+    private var visible: [DuplicateGroup] {
+        let byKind = filter.map { k in groups.filter { $0.kind == k } } ?? groups
+        let q = SearchQuery(search)
+        return q.isEmpty ? byKind : byKind.filter { g in g.tracks.contains { q.matches($0.searchKey) } }
+    }
     private var toRemove: [Track] { visible.flatMap { g in g.tracks.filter { $0.relPath != g.keep } } }
 
     var body: some View {

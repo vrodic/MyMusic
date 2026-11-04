@@ -24,10 +24,8 @@ struct YouTubeView: View {
         case .skipped: f = yt.items.filter { $0.priority == .skip && $0.status != .done }
         }
         let q = search.trimmingCharacters(in: .whitespaces)
-        let matched = q.isEmpty ? f : f.filter {
-            $0.title.localizedCaseInsensitiveContains(q) || ($0.uploader?.localizedCaseInsensitiveContains(q) ?? false)
-                || $0.videoID == q || ($0.relPath?.localizedCaseInsensitiveContains(q) ?? false)
-        }
+        let query = SearchQuery(q)
+        let matched = query.isEmpty ? f : f.filter { $0.videoID == q || query.matches(yt.searchKey($0)) }
         return matched.sorted(using: sortOrder)
     }
 

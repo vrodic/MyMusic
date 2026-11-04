@@ -31,15 +31,30 @@ final class YouTubeManager: ObservableObject {
     private var downloadRunner: ProcessRunner?
     private var poked = false
     private var defaultsObserver: NSObjectProtocol?
+    private var lastSettingsSnapshot = ""
+    private var settingsSnapshot: String {
+        let d = UserDefaults.standard
+        return d.dictionaryRepresentation().filter { $0.key.hasPrefix("yt.") && $0.key != "yt.lastRefresh" }
+            .sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "|")
+    }
 
-    init(db: LibraryDB, root: @escaping () -> URL?, onDownloaded: @escaping (String) async -> Void) {
+    private let rootIsRemote: () -> Bool
+
+    init(db: LibraryDB, root: @escaping () -> URL?, rootIsRemote: @escaping () -> Bool, onDownloaded: @escaping (String) async -> Void) {
         self.db = db
         self.rootProvider = root
+        self.rootIsRemote = rootIsRemote
         self.onDownloaded = onDownloaded
         db.resetStuckDownloads()
         // @AppStorage doesn't publish from an ObservableObject; forward settings changes to SwiftUI.
+        // Only when one of *our* settings changed: macOS also writes defaults for window and
+        // split-view sizes while you click around, and each redraw of the YouTube table is costly.
         defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.objectWillChange.send() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let snap = self.settingsSnapshot
+                if snap != self.lastSettingsSnapshot { self.lastSettingsSnapshot = snap; self.objectWillChange.send() }
+            }
         }
         // One-time: earlier builds defaulted to Chrome; switch to the browser macOS actually uses.
         if !browserDetected {
@@ -78,7 +93,15 @@ final class YouTubeManager: ObservableObject {
         return ProcessRunner.which("yt-dlp")
     }
 
-    func reload() { items = db.ytItems() }
+    func reload() {
+        items = db.ytItems()
+        searchKeys = Dictionary(uniqueKeysWithValues: items.map { ($0.videoID, Self.key(for: $0)) })
+    }
+
+    /// Folded "title artist path" per liked song, for accent-insensitive search.
+    private var searchKeys: [String: String] = [:]
+    private static func key(for i: YTItem) -> String { [i.title, i.uploader ?? "", i.relPath ?? ""].joined(separator: " ").searchFolded }
+    func searchKey(_ i: YTItem) -> String { searchKeys[i.videoID] ?? Self.key(for: i) }
 
     func start() {
         guard worker == nil else { return }
@@ -268,7 +291,7 @@ final class YouTubeManager: ObservableObject {
 
     private func download(_ item: YTItem, root: URL, ytdlp: String, forced: Bool) async {
         let ytDir = root.appendingPathComponent("yt", isDirectory: true)
-        try? FileManager.default.createDirectory(at: ytDir, withIntermediateDirectories: true)
+        await offMain { try? FileManager.default.createDirectory(at: ytDir, withIntermediateDirectories: true) }
         currentID = item.videoID; currentProgress = 0; currentForced = forced; cancelRequested = false
         statusLine = "Downloading \(item.title)"
         db.setYTStatus(item.videoID, .downloading)
@@ -293,7 +316,11 @@ final class YouTubeManager: ObservableObject {
         let output = try? await runner.run(ytdlp, args) { line in
             guard line.contains("[download]"), let pct = line.split(separator: " ").first(where: { $0.hasSuffix("%") }),
                   let v = Double(pct.dropLast()) else { return }
-            Task { @MainActor [weak self] in self?.currentProgress = v / 100 }
+            // yt-dlp prints many progress lines per second; redraw the (big) table only per 2 %
+            Task { @MainActor [weak self] in
+                guard let self, v >= 100 || abs(v / 100 - self.currentProgress) >= 0.02 else { return }
+                self.currentProgress = v / 100
+            }
         }
         downloadRunner = nil
         currentID = nil
@@ -303,10 +330,20 @@ final class YouTubeManager: ObservableObject {
 
         let printed = output.flatMap { String(data: $0.stdout, encoding: .utf8) }?
             .split(whereSeparator: \.isNewline).map(String.init).last { $0.hasPrefix("/") }
-        let file = printed.map { URL(fileURLWithPath: $0) } ?? findDownloaded(id: item.videoID, in: ytDir)
         let stderr = output?.stderr ?? ""
+        let succeeded = output?.status == 0
+        let videoID = item.videoID
+        let trustPrinted = rootIsRemote()
+        // Locate the file off the main thread. On a network volume, trust yt-dlp's printed path
+        // instead of stat-ing it (yt-dlp only prints after the final move succeeded).
+        let rel: String? = succeeded ? await offMain {
+            if let printed, trustPrinted { return URL(fileURLWithPath: printed).relativePath(from: root) }
+            guard let file = printed.map({ URL(fileURLWithPath: $0) }) ?? Self.findDownloaded(id: videoID, in: ytDir),
+                  FileManager.default.fileExists(atPath: file.path) else { return nil }
+            return file.relativePath(from: root)
+        } : nil
 
-        if output?.status == 0, let file, FileManager.default.fileExists(atPath: file.path), let rel = file.relativePath(from: root) {
+        if let rel {
             db.setYTStatus(item.videoID, .done, relPath: rel)
             appendLog("✓ \(item.title)")
             await onDownloaded(rel)
@@ -329,7 +366,7 @@ final class YouTubeManager: ObservableObject {
         reload()
     }
 
-    private func findDownloaded(id: String, in dir: URL) -> URL? {
+    nonisolated private static func findDownloaded(id: String, in dir: URL) -> URL? {
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         return files.first { $0.lastPathComponent.contains("[\(id)]") && $0.pathExtension == "m4a" }
     }

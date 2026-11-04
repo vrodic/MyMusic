@@ -16,11 +16,14 @@ enum AudioScanner {
         guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
                                                       options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         var out: [FileEntry] = []
-        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        // The enumerator builds child URLs from `root` as given, so a string prefix is enough.
+        // (Resolving symlinks per file costs several round trips each on SMB.)
+        let rootPath = root.standardizedFileURL.path
         for case let url as URL in en {
+            // size/mtime/isRegularFile were prefetched with the directory listing
             guard MyMusicService.audioExtensions.contains(url.pathExtension.lowercased()),
                   let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
-            let p = url.standardizedFileURL.resolvingSymlinksInPath().path
+            let p = url.standardizedFileURL.path
             guard p.hasPrefix(rootPath + "/") else { continue }
             out.append(FileEntry(url: url, relPath: String(p.dropFirst(rootPath.count + 1)),
                                  size: Int64(v.fileSize ?? 0),

@@ -16,6 +16,8 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var artists: [String] = []
     @Published private(set) var albums: [AlbumKey] = []
     private var byPath: [String: Int] = [:]
+    /// relPath → folded search text, built once per reload (folding 3,000 titles per keystroke is wasteful).
+    private var searchKeys: [String: String] = [:]
 
     init(db: LibraryDB) {
         self.db = db
@@ -29,6 +31,7 @@ final class LibraryStore: ObservableObject {
         tracks = all
         byPath = Dictionary(uniqueKeysWithValues: all.enumerated().map { ($1.relPath, $0) })
         folderRoot = FolderNode.build(all)
+        searchKeys = Dictionary(uniqueKeysWithValues: all.map { ($0.relPath, $0.searchKey) })
         artists = Set(all.map(\.displayArtist)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         albums = Set(all.map { AlbumKey(artist: $0.albumArtist ?? $0.displayArtist, album: $0.displayAlbum) })
             .sorted { $0.album.localizedStandardCompare($1.album) == .orderedAscending }
@@ -50,13 +53,13 @@ final class LibraryStore: ObservableObject {
     var recentlyPlayed: [Track] { tracks.filter { $0.lastPlayed != nil }.sorted { ($0.lastPlayed ?? 0) > ($1.lastPlayed ?? 0) }.prefix(200).map { $0 } }
     var recentlyAdded: [Track] { tracks.sorted { $0.addedAt > $1.addedAt }.prefix(200).map { $0 } }
 
-    func search(_ q: String) -> [Track] {
-        let q = q.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return tracks }
-        return tracks.filter {
-            $0.title.localizedCaseInsensitiveContains(q) || ($0.artist?.localizedCaseInsensitiveContains(q) ?? false)
-                || ($0.album?.localizedCaseInsensitiveContains(q) ?? false) || $0.relPath.localizedCaseInsensitiveContains(q)
-        }
+    /// Accent- and case-insensitive; every word must match title, artist, album or path.
+    func search(_ q: String) -> [Track] { filter(tracks, q) }
+
+    func filter(_ list: [Track], _ q: String) -> [Track] {
+        let query = SearchQuery(q)
+        guard !query.isEmpty else { return list }
+        return list.filter { query.matches(searchKeys[$0.relPath] ?? $0.searchKey) }
     }
 
     @discardableResult

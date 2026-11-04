@@ -61,6 +61,20 @@ final class FolderNode: Identifiable, Hashable {
         return node
     }
 
+    /// Folders below this one whose path matches the query. Only the shallowest match per branch is
+    /// returned ("jazz" gives "jazz" and "xiaomi/jazz", not every folder inside them).
+    func searchFolders(_ query: SearchQuery, limit: Int = 300) -> [FolderNode] {
+        guard !query.isEmpty else { return [] }
+        var out: [FolderNode] = []
+        func walk(_ n: FolderNode) {
+            for c in n.subfolders where out.count < limit {
+                if query.matches(c.path.searchFolded) { out.append(c) } else { walk(c) }
+            }
+        }
+        walk(self)
+        return out
+    }
+
     /// All tracks in this folder and below, in folder order.
     var allTracks: [Track] { tracks + subfolders.flatMap(\.allTracks) }
 }
@@ -79,23 +93,28 @@ struct FolderSelection: Codable, Equatable {
         !isSelected(node.path) && paths.contains { $0.hasPrefix(node.path.isEmpty ? "" : node.path + "/") }
     }
 
-    mutating func toggle(_ node: FolderNode, root: FolderNode) {
-        if isSelected(node.path) {
-            if paths.contains(node.path) { paths.remove(node.path); return }
-            // An ancestor is selected: replace it with all of its descendants except this branch.
-            guard let ancestor = paths.filter({ $0.isEmpty || node.path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }),
-                  var cur = root.node(at: ancestor) else { return }
-            paths.remove(ancestor)
-            let comps = node.path.split(separator: "/").map(String.init)
-            let skip = ancestor.isEmpty ? 0 : ancestor.split(separator: "/").count
-            for c in comps.dropFirst(skip) {
-                for s in cur.subfolders where s.name != c { paths.insert(s.path) }
-                guard let next = cur.subfolders.first(where: { $0.name == c }) else { break }
-                cur = next
-            }
-        } else {
-            paths = paths.filter { !$0.hasPrefix(node.path + "/") }
-            paths.insert(node.path)
+    mutating func toggle(_ node: FolderNode, root: FolderNode) { toggle(path: node.path, root: root) }
+
+    /// Toggle a folder or a single song (`path` is a folder path or a track relPath).
+    mutating func toggle(path: String, root: FolderNode) {
+        guard isSelected(path) else {
+            paths = paths.filter { !$0.hasPrefix(path + "/") }
+            paths.insert(path)
+            return
+        }
+        if paths.contains(path) { paths.remove(path); return }
+        // An ancestor is selected: replace it with everything under it except `path`.
+        guard let ancestor = paths.filter({ $0.isEmpty || path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }),
+              var cur = root.node(at: ancestor) else { return }
+        paths.remove(ancestor)
+        let comps = path.split(separator: "/").map(String.init)
+        let skip = ancestor.isEmpty ? 0 : ancestor.split(separator: "/").count
+        for (i, c) in comps.enumerated() where i >= skip {
+            // siblings of the branch we're carving out, folders and loose files alike
+            for s in cur.subfolders where s.name != c { paths.insert(s.path) }
+            for t in cur.tracks where t.relPath != path { paths.insert(t.relPath) }
+            guard i < comps.count - 1, let next = cur.subfolders.first(where: { $0.name == c }) else { break }
+            cur = next
         }
     }
 }

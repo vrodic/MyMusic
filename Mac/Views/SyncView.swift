@@ -3,6 +3,7 @@ import SwiftUI
 struct SyncView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var store: LibraryStore
+    @Binding var search: String
 
     var body: some View {
         let root = store.folderRoot
@@ -25,12 +26,16 @@ struct SyncView: View {
                     }
                 }
                 .toggleStyle(.switch)
-                List {
-                    OutlineGroup(root.subfolders, children: \.children) { node in
-                        FolderCheckRow(node: node, root: root)
+                let query = SearchQuery(search)
+                if query.isEmpty {
+                    List {
+                        OutlineGroup(root.subfolders, children: \.children) { node in
+                            FolderCheckRow(node: node, root: root)
+                        }
+                        ForEach(root.tracks) { FileCheckRow(track: $0, root: root) }
                     }
-                    let loose = root.tracks.count
-                    if loose > 0 { Text("\(loose) loose files in root are synced only with Select All").font(.caption).foregroundStyle(.secondary) }
+                } else {
+                    searchResults(query, root: root)
                 }
             }
             .padding()
@@ -79,6 +84,43 @@ struct SyncView: View {
             .frame(minWidth: 320)
         }
         .navigationTitle("Sync & Devices")
+    }
+
+    /// Flat list of folders (at any depth) and songs matching the toolbar search, each with a checkbox.
+    @ViewBuilder private func searchResults(_ query: SearchQuery, root: FolderNode) -> some View {
+        let folders = root.searchFolders(query)
+        let songs = store.filter(store.tracks, search)
+        let shownSongs = Array(songs.prefix(300))
+        HStack {
+            Text("\(folders.count) folders, \(songs.count) songs").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Check All") {
+                var sel = model.selection
+                for f in folders where !sel.isSelected(f.path) { sel.toggle(path: f.path, root: root) }
+                for t in songs where !sel.contains(relPath: t.relPath) { sel.toggle(path: t.relPath, root: root) }
+                model.selection = sel
+            }
+            Button("Uncheck All") {
+                var sel = model.selection
+                for f in folders where sel.isSelected(f.path) { sel.toggle(path: f.path, root: root) }
+                for t in songs where sel.contains(relPath: t.relPath) { sel.toggle(path: t.relPath, root: root) }
+                model.selection = sel
+            }
+        }
+        .disabled(folders.isEmpty && songs.isEmpty)
+        List {
+            if !folders.isEmpty {
+                Section("Folders") {
+                    ForEach(folders) { FolderCheckRow(node: $0, root: root, showPath: true) }
+                }
+            }
+            if !songs.isEmpty {
+                Section(songs.count > shownSongs.count ? "Songs (first \(shownSongs.count) of \(songs.count))" : "Songs") {
+                    ForEach(shownSongs) { FileCheckRow(track: $0, root: root, showPath: true) }
+                }
+            }
+        }
+        .overlay { if folders.isEmpty && songs.isEmpty { ContentUnavailableView.search(text: search) } }
     }
 
     static func localAddresses() -> [String] {
@@ -131,6 +173,7 @@ struct FolderCheckRow: View {
     @EnvironmentObject var model: AppModel
     let node: FolderNode
     let root: FolderNode
+    var showPath = false
 
     var body: some View {
         let selected = model.selection.isSelected(node.path)
@@ -141,9 +184,46 @@ struct FolderCheckRow: View {
                     .foregroundStyle(selected || partial ? Color.accentColor : .secondary)
             }.buttonStyle(.plain)
             Image(systemName: node.path == "yt" ? "play.rectangle.fill" : "folder.fill").foregroundStyle(node.path == "yt" ? .red : .blue)
-            Text(node.name)
+            if showPath {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(node.name)
+                    Text(node.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                }
+            } else {
+                Text(node.name)
+            }
             Spacer()
             Text("\(node.totalTracks)").foregroundStyle(.secondary).monospacedDigit()
+        }
+    }
+}
+
+/// Checkbox for a single song (selecting one song syncs just that file).
+struct FileCheckRow: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var store: LibraryStore
+    let track: Track
+    let root: FolderNode
+    var showPath = false
+
+    var body: some View {
+        let selected = model.selection.contains(relPath: track.relPath)
+        let viaFavorite = !selected && model.syncFavorites && (store.track(track.relPath)?.favorite ?? false)
+        HStack {
+            Button { model.selection.toggle(path: track.relPath, root: root) } label: {
+                Image(systemName: selected ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+            }.buttonStyle(.plain)
+            Image(systemName: "music.note").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(track.title).lineLimit(1)
+                if showPath {
+                    Text(track.relPath).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                }
+            }
+            Spacer()
+            if viaFavorite { Image(systemName: "heart.fill").foregroundStyle(.pink).help("Synced because it's a favorite") }
+            Text(ByteCountFormatter.string(fromByteCount: track.size, countStyle: .file)).font(.caption).foregroundStyle(.secondary)
         }
     }
 }

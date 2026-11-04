@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import SwiftUI
 import MediaPlayer
 #if canImport(UIKit)
 import UIKit
@@ -11,12 +12,27 @@ typealias PlatformImage = NSImage
 
 enum RepeatMode: String, CaseIterable { case off, all, one }
 
+/// Playback position, published separately (2×/s) so only the time label / slider redraw —
+/// not every view that observes the player (e.g. a 3,000-row song table).
+@MainActor
+final class PlaybackClock: ObservableObject {
+    @Published fileprivate(set) var time: Double = 0
+}
+
+/// Gives `content` the live playback time while observing only the clock.
+struct WithPlaybackTime<Content: View>: View {
+    @ObservedObject var clock: PlaybackClock
+    @ViewBuilder let content: (Double) -> Content
+    var body: some View { content(clock.time) }
+}
+
 @MainActor
 final class PlayerEngine: ObservableObject {
     @Published private(set) var queue: [Track] = []
     @Published private(set) var index: Int = 0
     @Published private(set) var isPlaying = false
-    @Published private(set) var currentTime: Double = 0
+    let clock = PlaybackClock()
+    var currentTime: Double { clock.time }
     @Published private(set) var duration: Double = 0
     @Published private(set) var artwork: PlatformImage?
     @Published var shuffle = false { didSet { applyShuffle() } }
@@ -117,12 +133,12 @@ final class PlayerEngine: ObservableObject {
 
     func seek(to seconds: Double) {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
-        currentTime = seconds; updateNowPlaying()
+        clock.time = seconds; updateNowPlaying()
     }
 
     func stop() {
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
-        isPlaying = false; currentTime = 0; duration = 0; artwork = nil
+        isPlaying = false; clock.time = 0; duration = 0; artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
@@ -153,7 +169,7 @@ final class PlayerEngine: ObservableObject {
     private func load(autoplay: Bool) {
         guard let t = current else { return }
         counted = false
-        currentTime = 0
+        clock.time = 0
         duration = t.duration ?? 0
         player.replaceCurrentItem(with: AVPlayerItem(url: urlFor(t)))
         artwork = nil
@@ -170,8 +186,9 @@ final class PlayerEngine: ObservableObject {
 
     private func tick(_ t: Double) {
         guard t.isFinite else { return }
-        currentTime = t
-        if let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = d }
+        clock.time = t
+        // assign only when it changes: every @Published write redraws all observers
+        if let d = player.currentItem?.duration.seconds, d.isFinite, d > 0, abs(d - duration) > 0.01 { duration = d }
         if !counted, duration > 0, t >= min(duration * 0.5, 240), let cur = current {
             counted = true
             onPlayCounted(cur)

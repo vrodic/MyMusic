@@ -81,9 +81,9 @@ final class ServerBackend: @unchecked Sendable {
                                          generatedAt: Date().timeIntervalSince1970, tracks: tracks))
         case ("GET", "/api/file"), ("HEAD", "/api/file"):
             guard let root, let rel = req.query["path"], let t = db.track(relPath: rel), syncFilter()(t) else { return .notFound }
-            let url = root.appendingPathComponent(rel)
-            guard url.relativePath(from: root) == rel else { return .notFound }
-            return .file(url)
+            // Only indexed paths get here; reject any ".." without touching the file system.
+            guard !rel.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { return .notFound }
+            return .file(root.appendingPathComponent(rel))
         case ("POST", "/api/stats"):
             guard let up = try? JSONDecoder().decode(StatsUpload.self, from: req.body) else { return .badRequest("bad json") }
             do { try db.storeDeviceStats(up) } catch { return .data(status: 500, contentType: "text/plain", body: Data("\(error)".utf8)) }
@@ -111,6 +111,8 @@ final class ServerBackend: @unchecked Sendable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var musicRoot: URL?
+    /// Music root is on SMB/AFP/NFS: avoid optional file-system calls.
+    @Published private(set) var rootIsRemote = false
     @Published var selection: FolderSelection { didSet { saveSelection(); pushBackend() } }
     @Published var syncFavorites: Bool { didSet { UserDefaults.standard.set(syncFavorites, forKey: "syncFavorites"); pushBackend() } }
     @Published private(set) var scanStatus = ""
@@ -121,6 +123,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var syncRequested: Set<String> = []
     /// Latest progress report per device (kept after it finishes, to show the result).
     @Published private(set) var syncProgress: [String: SyncProgress] = [:]
+    private var activeSyncIDs: Set<String> = []
     var activeSyncs: [SyncProgress] { syncProgress.values.filter(\.isActive).sorted { $0.deviceName < $1.deviceName } }
     @AppStorage("server.name") var serverName = Host.current().localizedName ?? "My Mac"
 
@@ -149,7 +152,7 @@ final class AppModel: ObservableObject {
         player = PlayerEngine(urlFor: { t in
             URL(fileURLWithPath: UserDefaults.standard.string(forKey: "musicRoot") ?? "/", isDirectory: true).appendingPathComponent(t.relPath)
         })
-        yt = YouTubeManager(db: db, root: { [weak self] in self?.musicRoot }, onDownloaded: { [weak self] rel in await self?.indexFile(rel) })
+        yt = YouTubeManager(db: db, root: { [weak self] in self?.musicRoot }, rootIsRemote: { [weak self] in self?.rootIsRemote ?? false }, onDownloaded: { [weak self] rel in await self?.indexFile(rel) })
 
         pushBackend()
         backend.onStatsUploaded = { [weak self] in
@@ -171,7 +174,10 @@ final class AppModel: ObservableObject {
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refreshOnline()
-                if !(self?.syncProgress.isEmpty ?? true) { self?.objectWillChange.send() }   // let stale progress expire
+                // redraw only when a sync just went stale (not every 10 s forever)
+                guard let self else { return }
+                let active = Set(self.syncProgress.filter { $0.value.isActive }.keys)
+                if active != self.activeSyncIDs { self.activeSyncIDs = active; self.objectWillChange.send() }
             }
         }
         server.onStateChange = { [weak self] s in Task { @MainActor in self?.serverStatus = s } }
@@ -180,6 +186,7 @@ final class AppModel: ObservableObject {
         devices = db.deviceBackups()
 
         startServer()
+        checkRemote()
         yt.start()
         if musicRoot != nil { Task { await rescan() } }
     }
@@ -200,6 +207,11 @@ final class AppModel: ObservableObject {
     func startServer() {
         backend.name = serverName
         server.start(name: serverName)
+    }
+
+    private func checkRemote() {
+        guard let root = musicRoot else { rootIsRemote = false; return }
+        Task { rootIsRemote = await offMain { root.isOnNetworkVolume } }
     }
 
     private func pushBackend() { backend.update(root: musicRoot, selection: selection, syncFavorites: syncFavorites) }
@@ -225,6 +237,7 @@ final class AppModel: ObservableObject {
         musicRoot = url
         UserDefaults.standard.set(url.path, forKey: "musicRoot")
         pushBackend()
+        checkRemote()
         Task {
             await rescan()
             if selection.paths.isEmpty {
@@ -268,9 +281,12 @@ final class AppModel: ObservableObject {
     func indexFile(_ rel: String) async {
         guard let root = musicRoot else { return }
         let url = root.appendingPathComponent(rel)
-        guard let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return }
-        let t = await AudioScanner.readTrack(.init(url: url, relPath: rel, size: Int64(v.fileSize ?? 0),
-                                                   mtime: (v.contentModificationDate ?? Date()).timeIntervalSince1970.rounded()), origin: .server)
+        let stamp = await offMain { () -> (Int64, Double)? in
+            guard let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
+            return (Int64(v.fileSize ?? 0), (v.contentModificationDate ?? Date()).timeIntervalSince1970.rounded())
+        }
+        guard let stamp else { return }
+        let t = await AudioScanner.readTrack(.init(url: url, relPath: rel, size: stamp.0, mtime: stamp.1), origin: .server)
         try? db.upsert([t])
         if let item = db.ytItems().first(where: { $0.relPath == rel }), item.favorite { db.setFavorite(rel, true) }
         store.reload()
@@ -279,29 +295,41 @@ final class AppModel: ObservableObject {
     /// Moves every non-kept copy to the Trash (or <root>/.duplicates when the volume has no Trash), merging stats into the keeper.
     func removeDuplicates(_ groups: [DuplicateGroup]) async -> (removed: Int, failed: [String]) {
         guard let root = musicRoot else { return (0, ["No music root"]) }
-        var removed = 0
-        var failed: [String] = []
-        let fm = FileManager.default
-        for g in groups {
-            for t in g.tracks where t.relPath != g.keep {
-                let url = root.appendingPathComponent(t.relPath)
+        // File moves happen off the main thread (each one is several SMB round trips).
+        let jobs = groups.flatMap { g in g.tracks.filter { $0.relPath != g.keep }.map { (track: $0, keep: g.keep) } }
+        let paths = jobs.map(\.track.relPath)
+        let outcome = await offMain { () -> [String: String?] in   // relPath -> error (nil = moved)
+            let fm = FileManager.default
+            var out: [String: String?] = [:]
+            for rel in paths {
+                let url = root.appendingPathComponent(rel)
                 do {
                     do {
                         try fm.trashItem(at: url, resultingItemURL: nil)
                     } catch {
-                        let dest = root.appendingPathComponent(".duplicates").appendingPathComponent(t.relPath)
+                        let dest = root.appendingPathComponent(".duplicates").appendingPathComponent(rel)
                         try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                         if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
                         try fm.moveItem(at: url, to: dest)
                     }
-                    db.mergeStats(from: t, into: g.keep)
-                    try? db.delete([t.relPath])
-                    if player.current?.relPath == t.relPath { player.stop() }
-                    removed += 1
+                    out[rel] = .some(nil)
                 } catch {
-                    failed.append("\(t.relPath): \(error.localizedDescription)")
+                    out[rel] = .some(error.localizedDescription)
                 }
             }
+            return out
+        }
+        var removed = 0
+        var failed: [String] = []
+        for job in jobs {
+            if let err = outcome[job.track.relPath] ?? "not attempted" {
+                failed.append("\(job.track.relPath): \(err)")
+                continue
+            }
+            db.mergeStats(from: job.track, into: job.keep)
+            try? db.delete([job.track.relPath])
+            if player.current?.relPath == job.track.relPath { player.stop() }
+            removed += 1
         }
         store.reload()
         yt.reload()

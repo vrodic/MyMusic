@@ -93,7 +93,7 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { PlayerBar() }
         }
-        .searchable(text: $search, placement: .toolbar, prompt: selection == .youtube ? "Search liked songs" : "Search library")
+        .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
         .toolbar {
             ToolbarItem {
                 if let p = model.activeSyncs.first {
@@ -124,32 +124,40 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if selection == .youtube {
-            YouTubeView(search: search)
-        } else if !search.isEmpty {
-            TrackTable(tracks: store.search(search), title: "Search")
-        } else {
-            switch selection ?? .songs {
-            case .songs: TrackTable(tracks: store.tracks, title: "Songs")
-            case .folders: FolderBrowser()
-            case .artists: ArtistBrowser()
-            case .albums: AlbumBrowser()
-            case .favorites:
-                TrackTable(tracks: store.favorites, title: "Favorites")
-                    .toolbar {
-                        ToolbarItem {
-                            Toggle(isOn: $model.syncFavorites) { Label("Sync favorites to iPhone", systemImage: "iphone.and.arrow.forward") }
-                                .help("Send all favorites to your iPhone, whichever folder they're in")
-                        }
+        // The toolbar search filters whatever section is open (it used to replace it).
+        switch selection ?? .songs {
+        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”")
+        case .folders: FolderBrowser(search: $search)
+        case .artists: ArtistBrowser(search: search)
+        case .albums: AlbumBrowser(search: search)
+        case .favorites:
+            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites")
+                .toolbar {
+                    ToolbarItem {
+                        Toggle(isOn: $model.syncFavorites) { Label("Sync favorites to iPhone", systemImage: "iphone.and.arrow.forward") }
+                            .help("Send all favorites to your iPhone, whichever folder they're in")
                     }
-            case .mostPlayed: TrackTable(tracks: store.mostPlayed, title: "Most Played", defaultSort: false)
-            case .recentlyPlayed: TrackTable(tracks: store.recentlyPlayed, title: "Recently Played", defaultSort: false)
-            case .recentlyAdded: TrackTable(tracks: store.recentlyAdded, title: "Recently Added", defaultSort: false)
-            case .youtube: YouTubeView(search: search)
-            case .duplicates: DuplicatesView()
-            case .stats: StatsView()
-            case .sync: SyncView()
-            }
+                }
+        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false)
+        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false)
+        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false)
+        case .youtube: YouTubeView(search: search)
+        case .duplicates: DuplicatesView(search: search)
+        case .stats: StatsView()
+        case .sync: SyncView(search: $search)
+        }
+    }
+
+    private var searchPrompt: String {
+        switch selection ?? .songs {
+        case .youtube: "Search liked songs"
+        case .folders: "Search folders and files"
+        case .sync: "Find folders or songs to sync"
+        case .artists: "Search artists"
+        case .albums: "Search albums"
+        case .duplicates: "Search duplicates"
+        case .stats: "Search library"
+        default: "Search \((selection ?? .songs).rawValue.lowercased())"
         }
     }
 }

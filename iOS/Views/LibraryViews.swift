@@ -47,19 +47,27 @@ struct FolderView: View {
     @EnvironmentObject var store: LibraryStore
     @EnvironmentObject var player: PlayerEngine
     let path: String
+    @State private var query = ""
 
     var body: some View {
         let node = store.folderRoot.node(at: path)
+        let q = SearchQuery(query)
+        // Searching covers this folder and everything below it.
+        let folders = node.map { q.isEmpty ? $0.subfolders : $0.searchFolders(q) } ?? []
+        let tracks = node.map { q.isEmpty ? $0.tracks : store.filter($0.allTracks, query) } ?? []
         List {
-            if let node {
-                if !node.subfolders.isEmpty {
-                    Section {
-                        ForEach(node.subfolders) { f in
+            if node != nil {
+                if !folders.isEmpty {
+                    Section(q.isEmpty ? "" : "Folders") {
+                        ForEach(folders) { f in
                             NavigationLink { FolderView(path: f.path) } label: {
                                 HStack {
                                     Image(systemName: f.path == "yt" ? "play.rectangle.fill" : "folder.fill")
                                         .foregroundStyle(f.path == "yt" ? .red : .blue)
-                                    Text(f.name)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(f.name)
+                                        if !q.isEmpty { Text(f.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head) }
+                                    }
                                     Spacer()
                                     Text("\(f.totalTracks)").font(.caption).foregroundStyle(.secondary)
                                 }
@@ -71,22 +79,25 @@ struct FolderView: View {
                         }
                     }
                 }
-                if !node.tracks.isEmpty {
-                    Section { TrackRows(tracks: node.tracks) }
+                if !tracks.isEmpty {
+                    Section(q.isEmpty ? "" : "Songs") { TrackRows(tracks: tracks) }
                 }
             } else {
                 ContentUnavailableView("Folder not found", systemImage: "folder")
             }
         }
         .navigationTitle(node?.path.isEmpty ?? true ? "Folders" : node!.name)
-        .toolbar { PlayShuffleToolbar(tracks: node?.allTracks ?? []) }
+        .searchable(text: $query, prompt: node?.path.isEmpty ?? true ? "Search folders and songs" : "Search in \(node!.name)")
+        .toolbar { PlayShuffleToolbar(tracks: q.isEmpty ? (node?.allTracks ?? []) : tracks) }
         .overlay {
             if store.tracks.isEmpty { ContentUnavailableView("No music yet", systemImage: "music.note", description: Text("Sync from your Mac, or drop folders into On My iPhone → MyMusic → Music in the Files app.")) }
+            else if !q.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: query) }
         }
     }
 }
 
 struct TrackListView: View {
+    @EnvironmentObject var store: LibraryStore
     let title: String
     let tracks: [Track]
     var showPlays = false
@@ -95,10 +106,7 @@ struct TrackListView: View {
 
     var body: some View {
         let q = query.trimmingCharacters(in: .whitespaces)
-        let shown = q.isEmpty ? tracks : tracks.filter {
-            $0.title.localizedCaseInsensitiveContains(q) || ($0.artist?.localizedCaseInsensitiveContains(q) ?? false)
-                || ($0.album?.localizedCaseInsensitiveContains(q) ?? false) || $0.relPath.localizedCaseInsensitiveContains(q)
-        }
+        let shown = store.filter(tracks, q)
         List { TrackRows(tracks: shown) }
             .navigationTitle(title)
             .searchable(text: $query, prompt: "Search \(title)")

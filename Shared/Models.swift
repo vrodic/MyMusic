@@ -111,10 +111,24 @@ extension Double {
 
 extension URL {
     /// relPath of `self` beneath `root`, or nil if outside it.
+    /// Pure string work first (no file-system calls, which are slow on SMB); symlinks are
+    /// only resolved as a fallback when the plain paths don't line up.
     func relativePath(from root: URL) -> String? {
-        let r = root.standardizedFileURL.resolvingSymlinksInPath().path
-        let p = standardizedFileURL.resolvingSymlinksInPath().path
-        guard p.hasPrefix(r + "/") else { return nil }
-        return String(p.dropFirst(r.count + 1))
+        let r = root.standardizedFileURL.path, p = standardizedFileURL.path
+        if p.hasPrefix(r + "/") { return String(p.dropFirst(r.count + 1)) }
+        let rr = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let pr = standardizedFileURL.resolvingSymlinksInPath().path
+        guard pr.hasPrefix(rr + "/") else { return nil }
+        return String(pr.dropFirst(rr.count + 1))
     }
+
+    /// Whether this file lives on a network volume (SMB/AFP/NFS). One stat; call off the main thread.
+    var isOnNetworkVolume: Bool {
+        (try? resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) == false
+    }
+}
+
+/// Run blocking work (file system, especially SMB) off the main thread.
+func offMain<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+    await Task.detached(priority: .utility) { work() }.value
 }

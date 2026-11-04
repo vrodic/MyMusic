@@ -21,8 +21,10 @@ struct MiniPlayer: View {
             .padding(.horizontal, 14).padding(.vertical, 8)
             .background(.regularMaterial)
             .overlay(alignment: .bottom) {
-                GeometryReader { g in
-                    Rectangle().fill(Color.accentColor).frame(width: g.size.width * (player.duration > 0 ? player.currentTime / player.duration : 0), height: 2)
+                WithPlaybackTime(clock: player.clock) { now in
+                    GeometryReader { g in
+                        Rectangle().fill(Color.accentColor).frame(width: g.size.width * (player.duration > 0 ? now / player.duration : 0), height: 2)
+                    }
                 }.frame(height: 2)
             }
             .contentShape(Rectangle())
@@ -57,15 +59,17 @@ struct NowPlayingView: View {
                     }
                 }
             }
-            VStack(spacing: 4) {
-                Slider(value: Binding(get: { scrub ?? player.currentTime }, set: { scrub = $0 }), in: 0...max(player.duration, 1)) { editing in
-                    if !editing, let s = scrub { player.seek(to: s); scrub = nil }
+            WithPlaybackTime(clock: player.clock) { now in
+                VStack(spacing: 4) {
+                    Slider(value: Binding(get: { scrub ?? now }, set: { scrub = $0 }), in: 0...max(player.duration, 1)) { editing in
+                        if !editing, let s = scrub { player.seek(to: s); scrub = nil }
+                    }
+                    HStack {
+                        Text((scrub ?? now).durationString)
+                        Spacer()
+                        Text("-" + max(0, player.duration - (scrub ?? now)).durationString)
+                    }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                HStack {
-                    Text((scrub ?? player.currentTime).durationString)
-                    Spacer()
-                    Text("-" + max(0, player.duration - (scrub ?? player.currentTime)).durationString)
-                }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             HStack(spacing: 40) {
                 Button { player.previous() } label: { Image(systemName: "backward.fill") }

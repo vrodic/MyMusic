@@ -76,54 +76,78 @@ extension Track { var durationSort: Double { duration ?? 0 } }
 struct FolderBrowser: View {
     @EnvironmentObject var store: LibraryStore
     @EnvironmentObject var player: PlayerEngine
+    @Binding var search: String
     @State private var path = ""
 
     var body: some View {
         let node = store.folderRoot.node(at: path) ?? store.folderRoot
+        let query = SearchQuery(search)
+        // Searching looks through this folder and everything below it.
+        let folders = query.isEmpty ? node.subfolders : node.searchFolders(query)
+        let tracks = query.isEmpty ? node.tracks : store.filter(node.allTracks, search)
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                Button("Music") { path = "" }.buttonStyle(.link)
+                Button("Music") { open("") }.buttonStyle(.link)
                 let comps = path.split(separator: "/").map(String.init)
                 ForEach(comps.indices, id: \.self) { i in
                     Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
-                    Button(comps[i]) { path = comps[...i].joined(separator: "/") }.buttonStyle(.link)
+                    Button(comps[i]) { open(comps[...i].joined(separator: "/")) }.buttonStyle(.link)
+                }
+                if !query.isEmpty {
+                    Text("· \(folders.count) folders, \(tracks.count) songs matching “\(search)”").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { player.play(node.allTracks) } label: { Label("Play All", systemImage: "play.fill") }
-                Button { player.shuffle = true; player.play(node.allTracks.shuffled()) } label: { Label("Shuffle", systemImage: "shuffle") }
+                let playable = query.isEmpty ? node.allTracks : tracks
+                Button { player.play(playable) } label: { Label("Play All", systemImage: "play.fill") }.disabled(playable.isEmpty)
+                Button { player.shuffle = true; player.play(playable.shuffled()) } label: { Label("Shuffle", systemImage: "shuffle") }.disabled(playable.isEmpty)
             }
             .padding(8)
             Divider()
             VSplitView {
-                List(node.subfolders) { f in
+                List(folders) { f in
                     HStack {
-                        Image(systemName: "folder.fill").foregroundStyle(.blue)
-                        Text(f.name)
+                        Image(systemName: f.path == "yt" ? "play.rectangle.fill" : "folder.fill").foregroundStyle(f.path == "yt" ? .red : .blue)
+                        if query.isEmpty {
+                            Text(f.name)
+                        } else {
+                            // show where a deep match lives
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(f.name)
+                                Text(f.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                            }
+                        }
                         Spacer()
                         Text("\(f.totalTracks)").foregroundStyle(.secondary).monospacedDigit()
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { path = f.path }
+                    .onTapGesture(count: 2) { open(f.path) }
                     .contextMenu {
-                        Button("Open") { path = f.path }
+                        Button("Open") { open(f.path) }
                         Button("Play") { player.play(f.allTracks) }
                     }
                 }
-                .frame(minHeight: node.subfolders.isEmpty ? 0 : 120)
-                TrackTable(tracks: node.tracks, title: node.path.isEmpty ? "Folders" : node.name)
+                .frame(minHeight: folders.isEmpty ? 0 : 120)
+                .overlay { if !query.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: search) } }
+                TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name)
                     .frame(minHeight: 150)
             }
         }
     }
+
+    /// Opening a folder clears the search so you see its contents.
+    private func open(_ p: String) { path = p; search = "" }
 }
 
 struct ArtistBrowser: View {
     @EnvironmentObject var store: LibraryStore
+    var search: String = ""
     @State private var artist: String?
 
     var body: some View {
+        let q = SearchQuery(search)
+        let list = q.isEmpty ? store.artists : store.artists.filter { q.matches($0.searchFolded) }
         HSplitView {
-            List(store.artists, id: \.self, selection: $artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
+            List(list, id: \.self, selection: $artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
             if let artist { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false) }
             else { ContentUnavailableView("Select an artist", systemImage: "music.mic").frame(maxWidth: .infinity) }
         }
@@ -132,11 +156,14 @@ struct ArtistBrowser: View {
 
 struct AlbumBrowser: View {
     @EnvironmentObject var store: LibraryStore
+    var search: String = ""
     @State private var album: AlbumKey?
 
     var body: some View {
+        let q = SearchQuery(search)
+        let list = q.isEmpty ? store.albums : store.albums.filter { q.matches(($0.album + " " + $0.artist).searchFolded) }
         HSplitView {
-            List(store.albums, selection: $album) { a in
+            List(list, selection: $album) { a in
                 VStack(alignment: .leading) { Text(a.album); Text(a.artist).font(.caption).foregroundStyle(.secondary) }.tag(a)
             }.frame(minWidth: 220, maxWidth: 340)
             if let album { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false) }
@@ -173,13 +200,15 @@ struct PlayerBar: View {
                     Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat").foregroundStyle(player.repeatMode == .off ? .secondary : Color.accentColor)
                 }
             }.buttonStyle(.plain).font(.title3)
-            HStack {
-                Text((scrub ?? player.currentTime).durationString).font(.caption).monospacedDigit()
-                Slider(value: Binding(get: { scrub ?? player.currentTime }, set: { scrub = $0 }),
-                       in: 0...max(player.duration, 1)) { editing in
-                    if !editing, let s = scrub { player.seek(to: s); scrub = nil }
+            WithPlaybackTime(clock: player.clock) { now in
+                HStack {
+                    Text((scrub ?? now).durationString).font(.caption).monospacedDigit()
+                    Slider(value: Binding(get: { scrub ?? now }, set: { scrub = $0 }),
+                           in: 0...max(player.duration, 1)) { editing in
+                        if !editing, let s = scrub { player.seek(to: s); scrub = nil }
+                    }
+                    Text(player.duration.durationString).font(.caption).monospacedDigit()
                 }
-                Text(player.duration.durationString).font(.caption).monospacedDigit()
             }.frame(minWidth: 220, maxWidth: 360)
             Image(systemName: "speaker.wave.2").foregroundStyle(.secondary)
             Slider(value: $player.volume, in: 0...1).frame(width: 80)
