@@ -1,0 +1,338 @@
+import AppKit
+import Foundation
+import SwiftUI
+
+/// Indexes YouTube "Liked music" with yt-dlp and downloads items one at a time, by priority.
+@MainActor
+final class YouTubeManager: ObservableObject {
+    @AppStorage("yt.playlistURL") var playlistURL = "https://music.youtube.com/playlist?list=LM"
+    @AppStorage("yt.cookiesBrowser") var cookiesBrowser = YouTubeManager.systemDefaultBrowser()   // or "file:/path/cookies.txt"
+    @AppStorage("yt.browserDetected") private var browserDetected = false
+    @AppStorage("yt.ytdlpPath") var ytdlpPath = ""
+    @AppStorage("yt.autoRefreshHours") var autoRefreshHours = 6
+    @AppStorage("yt.defaultPriority") var defaultPriorityRaw = YTPriority.normal.rawValue
+    @AppStorage("yt.paused") var paused = false { didSet { objectWillChange.send() } }
+    @AppStorage("yt.lastRefresh") private var lastRefresh: Double = 0
+
+    @Published private(set) var items: [YTItem] = []
+    @Published private(set) var isIndexing = false
+    @Published private(set) var currentID: String?
+    @Published private(set) var currentProgress: Double = 0
+    @Published private(set) var statusLine = ""
+    @Published private(set) var log: [String] = []
+    /// Human-readable reason the last index attempt failed (shown in the YouTube view).
+    @Published private(set) var lastError: String?
+    private var lastAttempt: Double = 0
+
+    private let db: LibraryDB
+    private let rootProvider: () -> URL?
+    private let onDownloaded: (String) async -> Void
+    private var worker: Task<Void, Never>?
+    private var downloadRunner: ProcessRunner?
+    private var poked = false
+    private var defaultsObserver: NSObjectProtocol?
+
+    init(db: LibraryDB, root: @escaping () -> URL?, onDownloaded: @escaping (String) async -> Void) {
+        self.db = db
+        self.rootProvider = root
+        self.onDownloaded = onDownloaded
+        db.resetStuckDownloads()
+        // @AppStorage doesn't publish from an ObservableObject; forward settings changes to SwiftUI.
+        defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.objectWillChange.send() }
+        }
+        // One-time: earlier builds defaulted to Chrome; switch to the browser macOS actually uses.
+        if !browserDetected {
+            if cookiesBrowser == "chrome" { cookiesBrowser = Self.systemDefaultBrowser() }
+            browserDetected = true
+        }
+        reload()
+    }
+
+    /// yt-dlp browser name of the system default browser.
+    static func systemDefaultBrowser() -> String {
+        guard let app = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://youtube.com")!),
+              let id = Bundle(url: app)?.bundleIdentifier?.lowercased() else { return "chrome" }
+        let map: [(String, String)] = [("firefox", "firefox"), ("chrome", "chrome"), ("safari", "safari"), ("brave", "brave"),
+                                       ("edgemac", "edge"), ("vivaldi", "vivaldi"), ("opera", "opera"), ("chromium", "chromium")]
+        return map.first { id.contains($0.0) }?.1 ?? "chrome"
+    }
+
+    static let fullDiskAccessURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
+
+    /// Turns yt-dlp's stderr into an actionable message.
+    private func explain(_ stderr: String) -> String {
+        let browser = cookiesBrowser.hasPrefix("file:") ? "the cookies file" : cookiesBrowser.capitalized
+        let errLine = stderr.split(whereSeparator: \.isNewline).last { $0.contains("ERROR") }.map(String.init) ?? String(stderr.suffix(300))
+        let lower = stderr.lowercased()
+        if lower.contains("cookies database") || lower.contains("operation not permitted") || lower.contains("permissionerror") {
+            return "macOS blocked access to \(browser)'s cookies. Give MyMusic Server Full Disk Access (System Settings → Privacy & Security → Full Disk Access), then press Refresh Liked. Also check the right browser is picked in Settings (⌘,).\n\n\(errLine)"
+        }
+        if lower.contains("sign in") || lower.contains("login") || lower.contains("does not exist") || lower.contains("private") {
+            return "YouTube didn't accept the login from \(browser). Sign in to music.youtube.com in \(browser), or pick another browser in Settings (⌘,).\n\n\(errLine)"
+        }
+        return errLine.isEmpty ? "yt-dlp failed with no output" : errLine
+    }
+    var resolvedYtdlp: String? {
+        if !ytdlpPath.isEmpty, FileManager.default.isExecutableFile(atPath: ytdlpPath) { return ytdlpPath }
+        return ProcessRunner.which("yt-dlp")
+    }
+
+    func reload() { items = db.ytItems() }
+
+    func start() {
+        guard worker == nil else { return }
+        worker = Task { [weak self] in await self?.loop() }
+    }
+
+    private func poke() { poked = true }
+
+    private func cookieArgs() -> [String] {
+        if cookiesBrowser.hasPrefix("file:") { return ["--cookies", String(cookiesBrowser.dropFirst(5))] }
+        if cookiesBrowser.isEmpty || cookiesBrowser == "none" { return [] }
+        return ["--cookies-from-browser", cookiesBrowser]
+    }
+
+    private func appendLog(_ s: String) {
+        log.append("[\(Date().formatted(date: .omitted, time: .standard))] \(s)")
+        if log.count > 500 { log.removeFirst(log.count - 500) }
+    }
+
+    // MARK: indexing
+
+    func refreshLiked() async {
+        guard !isIndexing, let ytdlp = resolvedYtdlp else {
+            if resolvedYtdlp == nil { statusLine = "yt-dlp not found – brew install yt-dlp" }
+            return
+        }
+        isIndexing = true; statusLine = "Indexing liked music…"
+        lastAttempt = Date().timeIntervalSince1970
+        defer { isIndexing = false }
+        do {
+            let out = try await ProcessRunner().run(ytdlp, ["--flat-playlist", "-J", "--no-warnings"] + cookieArgs() + [playlistURL])
+            guard out.status == 0,
+                  let json = try JSONSerialization.jsonObject(with: out.stdout) as? [String: Any],
+                  let entries = json["entries"] as? [[String: Any]] else {
+                statusLine = "Indexing failed"
+                lastError = explain(out.stderr)
+                if Self.isRateLimited(out.stderr) {
+                    cooldownUntil = Date().timeIntervalSince1970 + Double(max(cooldownHours, 1)) * 3600
+                }
+                appendLog("index failed: \(out.stderr.suffix(800))")
+                return
+            }
+            let parsed = entries.compactMap { e -> (id: String, title: String, uploader: String?, duration: Double?)? in
+                guard let id = e["id"] as? String else { return nil }
+                let artists = (e["artists"] as? [String])?.joined(separator: ", ")
+                return (id, (e["title"] as? String) ?? id,
+                        artists ?? (e["uploader"] as? String) ?? (e["channel"] as? String),
+                        (e["duration"] as? NSNumber)?.doubleValue)
+            }
+            try db.syncYTPlaylist(parsed, defaultPriority: YTPriority(rawValue: defaultPriorityRaw) ?? .normal)
+            lastRefresh = Date().timeIntervalSince1970
+            lastError = nil
+            reload()
+            statusLine = "Indexed \(parsed.count) liked songs"
+            appendLog(statusLine)
+            poke()
+        } catch {
+            statusLine = "Indexing failed"
+            lastError = error.localizedDescription
+        }
+    }
+
+    // MARK: throttling settings
+
+    @AppStorage("yt.delaySeconds") var delaySeconds = 20            // base wait between downloads (±50 % jitter)
+    @AppStorage("yt.maxPerHour") var maxPerHour = 40                // 0 = unlimited
+    @AppStorage("yt.maxPerDay") var maxPerDay = 300                 // 0 = unlimited
+    @AppStorage("yt.rateLimit") var rateLimit = ""                  // yt-dlp --limit-rate, e.g. "2M"
+    @AppStorage("yt.sleepRequests") var sleepRequests = true        // yt-dlp --sleep-requests 1
+    @AppStorage("yt.cooldownHours") var cooldownHours = 6           // pause after YouTube rate-limits us
+    @AppStorage("yt.cooldownUntil") var cooldownUntil: Double = 0
+
+    /// Songs the user asked for explicitly (double-click / Download Now): skip pause and throttling.
+    @Published private(set) var forcedQueue: [String] = []
+    @Published private(set) var waitReason: String?
+    private var cancelRequested = false
+    private var currentForced = false
+    private var lastDownloadEnd: Double = 0
+    private var nextDelay: Double = 0
+
+    var isCoolingDown: Bool { cooldownUntil > Date().timeIntervalSince1970 }
+
+    // MARK: priorities
+
+    func setPriority(_ ids: Set<String>, _ p: YTPriority) {
+        db.setYTPriority(Array(ids), p)
+        if p == .skip, let cur = currentID, ids.contains(cur), !currentForced { cancelCurrent() }
+        reload(); poke()
+    }
+
+    func retry(_ ids: Set<String>) { db.resetYT(Array(ids)); reload(); poke() }
+
+    func togglePause() {
+        paused.toggle()
+        if paused { if !currentForced { cancelCurrent() } } else { poke() }
+    }
+
+    func endCooldown() { cooldownUntil = 0; lastError = nil; poke() }
+
+    /// Download these right away, even while paused or throttled.
+    func downloadNow(_ ids: [String]) {
+        for id in ids {
+            guard let item = db.ytItem(id), item.status != .done, item.status != .downloading, !forcedQueue.contains(id) else { continue }
+            if item.status == .failed { db.resetYT([id]) }
+            forcedQueue.append(id)
+        }
+        reload(); poke()
+    }
+
+    private func cancelCurrent() { cancelRequested = true; downloadRunner?.cancel() }
+
+    // MARK: worker
+
+    /// Why the next queued (non-forced) download has to wait, and for how long.
+    private func throttle() -> (seconds: Double, reason: String)? {
+        let now = Date().timeIntervalSince1970
+        func at(_ t: Double) -> String { Date(timeIntervalSince1970: t).formatted(date: .omitted, time: .shortened) }
+        if cooldownUntil > now {
+            return (cooldownUntil - now, "YouTube rate-limited us – downloads resume at \(at(cooldownUntil))")
+        }
+        if maxPerDay > 0 {
+            let day = db.ytAttempts(within: 86400)
+            if day.count >= maxPerDay, let first = day.first {
+                return (first + 86400 - now, "Daily limit (\(maxPerDay)) reached – next at \(at(first + 86400))")
+            }
+        }
+        if maxPerHour > 0 {
+            let hour = db.ytAttempts(within: 3600)
+            if hour.count >= maxPerHour, let first = hour.first {
+                return (first + 3600 - now, "Hourly limit (\(maxPerHour)) reached – next at \(at(first + 3600))")
+            }
+        }
+        let wait = lastDownloadEnd + nextDelay - now
+        if wait > 0 { return (wait, "Waiting \(Int(wait.rounded(.up))) s between downloads") }
+        return nil
+    }
+
+    private func loop() async {
+        while !Task.isCancelled {
+            let now = Date().timeIntervalSince1970
+            if autoRefreshHours > 0, now - lastRefresh > Double(autoRefreshHours) * 3600,
+               now - lastAttempt > 1800, !isCoolingDown, rootProvider() != nil {   // after a failure, retry at most every 30 min
+                await refreshLiked()
+            }
+            guard let root = rootProvider(), let ytdlp = resolvedYtdlp else { await idle(60); continue }
+
+            // 1. explicit requests first, no throttling
+            if let id = forcedQueue.first {
+                forcedQueue.removeFirst()
+                if let item = db.ytItem(id), item.status != .done {
+                    waitReason = nil
+                    await download(item, root: root, ytdlp: ytdlp, forced: true)
+                }
+                continue
+            }
+            // 2. the regular queue, by priority, throttled
+            if !paused, let next = db.nextYTDownload() {
+                if let t = throttle() {
+                    waitReason = t.reason
+                    await idle(min(t.seconds, 60))
+                    continue
+                }
+                waitReason = nil
+                await download(next, root: root, ytdlp: ytdlp, forced: false)
+                continue
+            }
+            waitReason = nil
+            await idle(60)
+        }
+    }
+
+    /// Sleep up to `seconds`, waking early when poked (new request, resume, priority change).
+    private func idle(_ seconds: Double) async {
+        poked = false
+        var left = max(1, seconds)
+        while left > 0, !poked, !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(min(1, left)))
+            left -= 1
+        }
+    }
+
+    private static func isRateLimited(_ stderr: String) -> Bool {
+        let s = stderr.lowercased()
+        return s.contains("http error 429") || s.contains("too many requests") || s.contains("not a bot")
+            || s.contains("rate-limit") || s.contains("rate limit") || s.contains("this content isn't available, try again later")
+    }
+
+    private func download(_ item: YTItem, root: URL, ytdlp: String, forced: Bool) async {
+        let ytDir = root.appendingPathComponent("yt", isDirectory: true)
+        try? FileManager.default.createDirectory(at: ytDir, withIntermediateDirectories: true)
+        currentID = item.videoID; currentProgress = 0; currentForced = forced; cancelRequested = false
+        statusLine = "Downloading \(item.title)"
+        db.setYTStatus(item.videoID, .downloading)
+        db.markYTAttempt(item.videoID)
+        reload()
+
+        var args = [
+            "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a",
+            "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
+            "--ppa", "ThumbnailsConvertor+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"",
+            "--no-playlist", "--no-overwrites", "--newline", "--progress", "--trim-filenames", "180",
+            "--print", "after_move:filepath",
+            "-o", ytDir.path + "/%(artist,uploader,channel|Unknown)s - %(title)s [%(id)s].%(ext)s",
+        ]
+        let limit = rateLimit.trimmingCharacters(in: .whitespaces)
+        if !limit.isEmpty { args += ["--limit-rate", limit] }
+        if sleepRequests { args += ["--sleep-requests", "1"] }
+        args += cookieArgs() + ["https://music.youtube.com/watch?v=\(item.videoID)"]
+
+        let runner = ProcessRunner()
+        downloadRunner = runner
+        let output = try? await runner.run(ytdlp, args) { line in
+            guard line.contains("[download]"), let pct = line.split(separator: " ").first(where: { $0.hasSuffix("%") }),
+                  let v = Double(pct.dropLast()) else { return }
+            Task { @MainActor [weak self] in self?.currentProgress = v / 100 }
+        }
+        downloadRunner = nil
+        currentID = nil
+        currentForced = false
+        lastDownloadEnd = Date().timeIntervalSince1970
+        nextDelay = Double(delaySeconds) * Double.random(in: 0.5...1.5)
+
+        let printed = output.flatMap { String(data: $0.stdout, encoding: .utf8) }?
+            .split(whereSeparator: \.isNewline).map(String.init).last { $0.hasPrefix("/") }
+        let file = printed.map { URL(fileURLWithPath: $0) } ?? findDownloaded(id: item.videoID, in: ytDir)
+        let stderr = output?.stderr ?? ""
+
+        if output?.status == 0, let file, FileManager.default.fileExists(atPath: file.path), let rel = file.relativePath(from: root) {
+            db.setYTStatus(item.videoID, .done, relPath: rel)
+            appendLog("✓ \(item.title)")
+            await onDownloaded(rel)
+        } else if cancelRequested {
+            db.setYTStatus(item.videoID, .pending)
+            appendLog("⏸ \(item.title)")
+        } else if Self.isRateLimited(stderr) {
+            // Don't burn retry attempts; back off for a while instead.
+            db.setYTStatus(item.videoID, .pending)
+            cooldownUntil = Date().timeIntervalSince1970 + Double(max(cooldownHours, 1)) * 3600
+            lastError = "YouTube is rate-limiting downloads, so the queue is paused until \(Date(timeIntervalSince1970: cooldownUntil).formatted(date: .omitted, time: .shortened)). Double-clicking a song still downloads it. Consider a longer wait between downloads in Settings (⌘,).\n\n\(stderr.split(whereSeparator: \.isNewline).last { $0.contains("ERROR") } ?? "")"
+            appendLog("⛔ rate-limited on \(item.title) – cooling down \(cooldownHours) h")
+        } else {
+            let err = stderr.split(whereSeparator: \.isNewline).last { $0.contains("ERROR") }.map(String.init) ?? "unknown error"
+            db.setYTStatus(item.videoID, .failed, error: err)
+            appendLog("✗ \(item.title): \(err)")
+        }
+        cancelRequested = false
+        statusLine = ""
+        reload()
+    }
+
+    private func findDownloaded(id: String, in dir: URL) -> URL? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.first { $0.lastPathComponent.contains("[\(id)]") && $0.pathExtension == "m4a" }
+    }
+
+    var counts: [YTStatus: Int] { Dictionary(grouping: items, by: \.status).mapValues(\.count) }
+}
