@@ -63,9 +63,10 @@ struct YouTubeView: View {
             .contextMenu(forSelectionType: YTItem.ID.self) { ids in
                 itemMenu(ids)
             } primaryAction: { ids in
-                // Double-click: play if downloaded, otherwise download it now (ignores pause and throttling).
+                // Double-click: play if downloaded or already in the library; otherwise download it now
+                // (ignores pause and throttling). Downloading a library match takes the context menu.
                 if ids.count == 1, let id = ids.first, let item = yt.items.first(where: { $0.id == id }),
-                   item.status == .done, let rel = item.relPath, let t = model.store.track(rel) {
+                   let t = playableTrack(item) {
                     player.play([t])
                 } else {
                     yt.downloadNow(rows.filter { ids.contains($0.id) }.map(\.id))
@@ -174,6 +175,14 @@ struct YouTubeView: View {
             Button("Open on YouTube") {
                 if let id = ids.first, let u = URL(string: "https://music.youtube.com/watch?v=\(id)") { NSWorkspace.shared.open(u) }
             }
+    }
+
+    /// The track a double-click plays: the downloaded file, else the library copy it matched.
+    private func playableTrack(_ item: YTItem) -> Track? {
+        if item.status == .done, let rel = item.relPath, let t = model.store.track(rel) { return t }
+        guard !item.matchOverride, item.likelyInLibrary || item.possibleMatch,
+              let m = item.libraryMatch, !m.isEmpty else { return nil }
+        return model.store.track(m)
     }
 
     // computed only when actually needed (the dialog), not on every redraw
