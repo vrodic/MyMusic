@@ -360,28 +360,17 @@ final class YouTubeManager: ObservableObject {
         db.markYTAttempt(item.videoID)
         reload()
 
-        var args = [
-            "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a",
-            "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
-            "--ppa", "ThumbnailsConvertor+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"",
-            "--no-playlist", "--no-overwrites", "--newline", "--progress", "--trim-filenames", "180",
-            "--print", "after_move:filepath",
-            "-o", ytDir.path + "/%(artist,uploader,channel|Unknown)s - %(title)s [%(id)s].%(ext)s",
-        ]
-        let limit = rateLimit.trimmingCharacters(in: .whitespaces)
-        if !limit.isEmpty { args += ["--limit-rate", limit] }
-        if sleepRequests { args += ["--sleep-requests", "1"] }
-        args += cookieArgs() + ["https://music.youtube.com/watch?v=\(item.videoID)"]
-
-        let runner = ProcessRunner()
-        downloadRunner = runner
-        let output = try? await runner.run(ytdlp, args) { line in
-            guard line.contains("[download]"), let pct = line.split(separator: " ").first(where: { $0.hasSuffix("%") }),
-                  let v = Double(pct.dropLast()) else { return }
-            // yt-dlp prints many progress lines per second; redraw the (big) table only per 2 %
-            Task { @MainActor [weak self] in
-                guard let self, v >= 100 || abs(v / 100 - self.currentProgress) >= 0.02 else { return }
-                self.currentProgress = v / 100
+        var output = await runDownload(videoID: item.videoID, ytDir: ytDir, ytdlp: ytdlp)
+        // The liked video itself can be gone or blocked here while YouTube Music still plays the
+        // song from another upload: find that copy (same title, artist, length) and fetch it.
+        if output?.status != 0, !cancelRequested, Self.isUnavailable(output?.stderr ?? "") {
+            statusLine = "\(item.title): liked video unavailable, looking for another copy…"
+            if let alt = await findAlternative(for: item, ytdlp: ytdlp) {
+                appendLog("↪ \(item.title): liked video \(item.videoID) is unavailable, using \(alt)")
+                statusLine = "Downloading \(item.title) (from \(alt))"
+                output = await runDownload(videoID: alt, ytDir: ytDir, ytdlp: ytdlp)
+            } else {
+                appendLog("✗ \(item.title): liked video is unavailable and no other copy was found")
             }
         }
         downloadRunner = nil
@@ -426,6 +415,83 @@ final class YouTubeManager: ObservableObject {
         cancelRequested = false
         statusLine = ""
         reload()
+    }
+
+    /// yt-dlp arguments: audio only; AAC/m4a when YouTube has it, otherwise the original audio
+    /// (usually Opus) copied untouched into an .m4a (no re-encoding, no quality loss; Apple's players
+    /// handle Opus in MP4). Tags and a square cover are embedded either way.
+    private func downloadArgs(videoID: String, ytDir: URL) -> [String] {
+        var args = [
+            "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a",
+            // copy the audio stream into a plain MP4 container ("ipod" .m4a refuses Opus)
+            "--ppa", "ExtractAudio+ffmpeg_o:-c:a copy -f mp4",
+            "--ppa", "Metadata+ffmpeg_o:-f mp4",
+            "--ppa", "EmbedThumbnail+ffmpeg_o:-f mp4",
+            "--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg",
+            "--ppa", "ThumbnailsConvertor+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"",
+            "--no-playlist", "--no-overwrites", "--newline", "--progress", "--trim-filenames", "180",
+            "--print", "after_move:filepath",
+            "-o", ytDir.path + "/%(artist,uploader,channel|Unknown)s - %(title)s [%(id)s].%(ext)s",
+        ]
+        let limit = rateLimit.trimmingCharacters(in: .whitespaces)
+        if !limit.isEmpty { args += ["--limit-rate", limit] }
+        if sleepRequests { args += ["--sleep-requests", "1"] }
+        return args + cookieArgs() + ["https://music.youtube.com/watch?v=\(videoID)"]
+    }
+
+    private func runDownload(videoID: String, ytDir: URL, ytdlp: String) async -> ProcessRunner.Output? {
+        let runner = ProcessRunner()
+        downloadRunner = runner
+        return try? await runner.run(ytdlp, downloadArgs(videoID: videoID, ytDir: ytDir)) { line in
+            guard line.contains("[download]"), let pct = line.split(separator: " ").first(where: { $0.hasSuffix("%") }),
+                  let v = Double(pct.dropLast()) else { return }
+            // yt-dlp prints many progress lines per second; redraw the (big) table only per 2 %
+            Task { @MainActor [weak self] in
+                guard let self, v >= 100 || abs(v / 100 - self.currentProgress) >= 0.02 else { return }
+                self.currentProgress = v / 100
+            }
+        }
+    }
+
+    static func isUnavailable(_ stderr: String) -> Bool {
+        let s = stderr.lowercased()
+        return s.contains("video unavailable") || s.contains("is not available") || s.contains("has been removed")
+            || s.contains("private video") || s.contains("account associated with this video has been terminated")
+            || s.contains("not made this video available in your country")
+    }
+
+    /// Another upload of the same song on YouTube Music: the song results for "artist title" are
+    /// checked (without downloading) and the first one with a matching title, an overlapping artist
+    /// and a length within 10 s of the liked video wins.
+    private func findAlternative(for item: YTItem, ytdlp: String) async -> String? {
+        let artist = YTLibraryMatcher.cleanChannel(item.uploader ?? "")
+        let query = "\(artist) \(item.title)".trimmingCharacters(in: .whitespaces)
+        guard var c = URLComponents(string: "https://music.youtube.com/search") else { return nil }
+        c.queryItems = [URLQueryItem(name: "q", value: query)]
+        guard let url = c.url?.absoluteString else { return nil }
+        guard let search = try? await ProcessRunner().run(ytdlp, ["--flat-playlist", "-J", "--playlist-items", "1:5", "--no-warnings"]
+                                                       + cookieArgs() + [url + "#songs"]),
+              search.status == 0,
+              let json = try? JSONSerialization.jsonObject(with: search.stdout) as? [String: Any],
+              let entries = json["entries"] as? [[String: Any]] else { return nil }
+        let wantTitle = YTLibraryMatcher.words(item.title)
+        let wantArtist = YTLibraryMatcher.words(artist)
+        for e in entries.prefix(5) {
+            guard let id = e["id"] as? String, id != item.videoID, let title = e["title"] as? String else { continue }
+            let tw = YTLibraryMatcher.words(title)
+            guard max(YTLibraryMatcher.overlap(wantTitle, tw), YTLibraryMatcher.charSimilarity(wantTitle, tw)) >= 0.8 else { continue }
+            // check the candidate: is it available, who is it by, how long is it?
+            guard let probe = try? await ProcessRunner().run(ytdlp, ["--skip-download", "--no-playlist", "--no-warnings", "-J"]
+                                                          + cookieArgs() + ["https://music.youtube.com/watch?v=\(id)"]),
+                  probe.status == 0,
+                  let info = try? JSONSerialization.jsonObject(with: probe.stdout) as? [String: Any] else { continue }
+            let names = ((info["artists"] as? [String]) ?? []) + [info["artist"] as? String, info["uploader"] as? String, info["channel"] as? String].compactMap { $0 }
+            let aw = YTLibraryMatcher.words(names.map(YTLibraryMatcher.cleanChannel).joined(separator: " "))
+            if !wantArtist.isEmpty, YTLibraryMatcher.containment(wantArtist, aw) < 0.5 { continue }
+            if let want = item.duration, let got = (info["duration"] as? NSNumber)?.doubleValue, abs(want - got) > 10 { continue }
+            return id
+        }
+        return nil
     }
 
     nonisolated private static func findDownloaded(id: String, in dir: URL) -> URL? {
