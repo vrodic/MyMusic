@@ -140,8 +140,18 @@ final class ServerBackend: @unchecked Sendable {
     }
 }
 
+/// "Show in Songs" / "Show in Folder": switch to that list, then select and scroll to the song.
+struct RevealRequest: Equatable {
+    enum Place { case songs, folder }
+    var relPath: String
+    var place: Place
+    var id = UUID()
+}
+
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var revealRequest: RevealRequest?
+    func reveal(_ t: Track, in place: RevealRequest.Place) { revealRequest = RevealRequest(relPath: t.relPath, place: place) }
     @Published private(set) var musicRoot: URL?
     /// Music root is on SMB/AFP/NFS: avoid optional file-system calls.
     @Published private(set) var rootIsRemote = false

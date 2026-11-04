@@ -59,6 +59,7 @@ struct YouTubeView: View {
                     }.labelsHidden().disabled(i.status == .done)
                 }.width(150)
             }
+            .rememberScroll("youtube\u{1}\(filter.rawValue)\u{1}\(sortOrder)", resetOn: search)
             .id(TableIdentity.of(filter.rawValue, search, "\(sortOrder)"))
             .contextMenu(forSelectionType: YTItem.ID.self) { ids in
                 itemMenu(ids)
@@ -67,7 +68,7 @@ struct YouTubeView: View {
                 // (ignores pause and throttling). Downloading a library match takes the context menu.
                 if ids.count == 1, let id = ids.first, let item = yt.items.first(where: { $0.id == id }),
                    let t = playableTrack(item) {
-                    player.play([t])
+                    play(item, t)
                 } else {
                     yt.downloadNow(rows.filter { ids.contains($0.id) }.map(\.id))
                 }
@@ -162,19 +163,30 @@ struct YouTubeView: View {
                 Button("Already in Library – Don't Download") { yt.markInLibrary(ids) }
             }
             if let m = sel.first?.libraryMatch, !m.isEmpty, let t = model.store.track(m) {
-                Button("Play Library Match") { player.play([t]) }
+                Button("Play Library Match") { if let i = sel.first { play(i, t) } }
                 Button("Show Library Match in Finder") { model.revealInFinder(t) }
             }
             Button("Retry Download") { yt.retry(ids) }
             if let id = ids.first, let item = yt.items.first(where: { $0.id == id }), let rel = item.relPath,
                let t = model.store.track(rel) {
-                Button("Play") { player.play([t]) }
+                Button("Play") { play(item, t) }
                 Button("Show in Finder") { model.revealInFinder(t) }
                 SyncMenuItem(paths: rows.filter { ids.contains($0.id) }.compactMap(\.relPath))
             }
             Button("Open on YouTube") {
                 if let id = ids.first, let u = URL(string: "https://music.youtube.com/watch?v=\(id)") { NSWorkspace.shared.open(u) }
             }
+    }
+
+    /// Play `t` for `item`, then carry on through the other playable songs in the list as shown.
+    private func play(_ item: YTItem, _ t: Track) {
+        var queue: [Track] = [], seen: Set<String> = [], start: Int?
+        for r in rows {
+            if r.id == item.id { start = queue.count; queue.append(t); seen.insert(t.relPath) }
+            else if let p = playableTrack(r), seen.insert(p.relPath).inserted { queue.append(p) }
+        }
+        guard let start else { player.play([t]); return }
+        player.play(queue, startAt: start)
     }
 
     /// The track a double-click plays: the downloaded file, else the library copy it matched.

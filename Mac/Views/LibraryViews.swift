@@ -10,6 +10,12 @@ struct TrackTable: View {
     /// What the rows depend on besides library growth (search text, folder…). When it changes the
     /// table is rebuilt instead of diffed; a song arriving from a download still updates in place.
     var resetKey: String = ""
+    /// Which list this is, for remembering its scroll position (default: title + resetKey).
+    var scrollKey: String? = nil
+    /// The search text: changing it forgets the remembered scroll position.
+    var search: String = ""
+    /// Set on the list "Show in Songs" / "Show in Folder" should select the song in.
+    var revealPlace: RevealRequest.Place? = nil
     /// Set when showing a playlist: adds Remove / Move to Top.
     var playlistID: String? = nil
     @State private var sortOrder: [KeyPathComparator<Track>] = []
@@ -45,7 +51,10 @@ struct TrackTable: View {
         // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
         // table instead of letting it diff thousands of rows on the main thread (the beachball).
         // Property changes (hearts, play counts) keep the same identity and update in place.
+        .rememberScroll(scrollMemoryKey, resetOn: search)
         .id(TableIdentity.of(resetKey, title, "\(sortOrder)"))
+        .onAppear(perform: handleReveal)
+        .onChange(of: model.revealRequest) { handleReveal() }
         .contextMenu(forSelectionType: Track.ID.self) { ids in
             let picked = rows.filter { ids.contains($0.id) }
             Button("Play") { play(picked.first, in: rows) }
@@ -84,6 +93,16 @@ struct TrackTable: View {
         let fav = !allFavorite
         model.store.setFavorite(tracks, fav)
         for t in tracks { if let u = model.store.track(t.relPath) { player.refresh(u) } }
+    }
+
+    private var scrollMemoryKey: String { "tracks\u{1}" + (scrollKey ?? title + "\u{1}" + resetKey) + "\u{1}\(sortOrder)" }
+
+    private func handleReveal() {
+        guard let r = model.revealRequest, r.place == revealPlace,
+              let i = sorted.firstIndex(where: { $0.relPath == r.relPath }) else { return }
+        selection = [r.relPath]
+        ScrollMemory.scrollToRow(i, key: scrollMemoryKey)
+        model.revealRequest = nil
     }
 
     private func play(_ t: Track?, in rows: [Track]) {
@@ -153,13 +172,15 @@ struct FolderBrowser: View {
                         SyncMenuItem(paths: [f.path], noun: "Folder")
                     }
                 }
+                .rememberScroll("folders\u{1}" + path, resetOn: search)
                 .frame(height: clampedListHeight(in: geo.size.height))
                 .overlay {
                     if !query.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: search) }
                     else if folders.isEmpty { Text(query.isEmpty ? "No subfolders" : "No matching folders").font(.caption).foregroundStyle(.secondary) }
                 }
                 SplitDivider(height: $folderListHeight, maxHeight: geo.size.height - 150)
-                TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name, resetKey: path + "\u{1}" + search)
+                TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name, resetKey: path + "\u{1}" + search,
+                           scrollKey: "folder:" + path, search: search, revealPlace: query.isEmpty ? .folder : nil)
                     .frame(maxHeight: .infinity)
             }
             }
@@ -186,7 +207,7 @@ struct ArtistBrowser: View {
         let q = SearchQuery(search)
         let list = q.isEmpty ? store.artists : store.artists.filter { q.matches($0.searchFolded) }
         HSplitView {
-            List(list, id: \.self, selection: artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
+            List(list, id: \.self, selection: artist) { Text($0) }.rememberScroll("artists", resetOn: search).frame(minWidth: 200, maxWidth: 320)
             if let artist = artist.wrappedValue { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false, resetKey: artist) }
             else { ContentUnavailableView("Select an artist", systemImage: "music.mic").frame(maxWidth: .infinity) }
         }
@@ -207,7 +228,7 @@ struct AlbumBrowser: View {
         HSplitView {
             List(list, selection: album) { a in
                 VStack(alignment: .leading) { Text(a.album); Text(a.artist).font(.caption).foregroundStyle(.secondary) }.tag(a)
-            }.frame(minWidth: 220, maxWidth: 340)
+            }.rememberScroll("albums", resetOn: search).frame(minWidth: 220, maxWidth: 340)
             if let album = album.wrappedValue { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false, resetKey: album.id) }
             else { ContentUnavailableView("Select an album", systemImage: "square.stack").frame(maxWidth: .infinity) }
         }
@@ -222,11 +243,25 @@ struct PlayerBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            ArtworkView(image: player.artwork, size: 44)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(player.current?.title ?? "Not Playing").font(.headline).lineLimit(1)
-                Text(player.current.map { "\($0.displayArtist) — \($0.displayAlbum)" } ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }.frame(width: 220, alignment: .leading)
+            HStack(spacing: 14) {
+                ArtworkView(image: player.artwork, size: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(player.current?.title ?? "Not Playing").font(.headline).lineLimit(1)
+                    Text(player.current.map { "\($0.displayArtist) — \($0.displayAlbum)" } ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }.frame(width: 220, alignment: .leading)
+            }
+            .contentShape(Rectangle())
+            // Double-click the song to find it in Songs; right-click for more.
+            .onTapGesture(count: 2) { if let t = currentTrack { model.reveal(t, in: .songs) } }
+            .contextMenu {
+                if let t = currentTrack {
+                    Button("Show in Songs") { model.reveal(t, in: .songs) }
+                    Button("Show in Folder") { model.reveal(t, in: .folder) }
+                    Divider()
+                    Button("Show in Finder") { model.revealInFinder(t) }
+                }
+            }
+            .help(player.current == nil ? "" : "Double-click to show in Songs")
             if let cur = player.current {
                 Button { model.toggleFavorite(model.store.track(cur.relPath) ?? cur) } label: {
                     Image(systemName: (model.store.track(cur.relPath)?.favorite ?? false) ? "heart.fill" : "heart")
@@ -260,6 +295,8 @@ struct PlayerBar: View {
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(.bar)
     }
+
+    private var currentTrack: Track? { player.current.map { model.store.track($0.relPath) ?? $0 } }
 
     private func cycleRepeat() {
         let all = RepeatMode.allCases

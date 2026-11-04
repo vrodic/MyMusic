@@ -62,6 +62,7 @@ struct ContentView: View {
     /// Sidebar selection: a SidebarItem's raw value, or "pl:<playlist id>".
     @State private var selectionKey: String?
     @State private var search = ""
+    @AppStorage("mac.folderPath") private var folderPath = ""   // FolderBrowser's open folder
 
     private var selection: SidebarItem? {
         get { selectionKey.flatMap(SidebarItem.init(rawValue:)) }
@@ -121,6 +122,17 @@ struct ContentView: View {
         .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
         .onAppear { if selectionKey == nil { selectionKey = savedSection.hasPrefix("pl:") || SidebarItem(rawValue: savedSection) != nil ? savedSection : SidebarItem.songs.rawValue } }
         .onChange(of: selectionKey) { _, new in if let new { savedSection = new } }
+        .onChange(of: model.revealRequest) { _, r in
+            // Navigate; the target TrackTable selects and scrolls once it shows the song.
+            guard let r else { return }
+            search = ""
+            switch r.place {
+            case .songs: selectionKey = SidebarItem.songs.rawValue
+            case .folder:
+                folderPath = (r.relPath as NSString).deletingLastPathComponent
+                selectionKey = SidebarItem.folders.rawValue
+            }
+        }
         .toolbar {
             ToolbarItem { UserMenu() }
             ToolbarItem {
@@ -154,7 +166,7 @@ struct ContentView: View {
     @ViewBuilder private var detail: some View {
         if let p = selectedPlaylist {
             TrackTable(tracks: store.filter(model.tracks(in: p), search), title: p.name, defaultSort: false,
-                       resetKey: p.id + "\u{1}" + search, playlistID: p.id)
+                       resetKey: p.id + "\u{1}" + search, scrollKey: "pl:" + p.id, search: search, playlistID: p.id)
         } else {
             sectionDetail
         }
@@ -163,21 +175,22 @@ struct ContentView: View {
     @ViewBuilder private var sectionDetail: some View {
         // The toolbar search filters whatever section is open (it used to replace it).
         switch selection ?? .songs {
-        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search)
+        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search,
+                               scrollKey: "songs", search: search, revealPlace: search.isEmpty ? .songs : nil)
         case .folders: FolderBrowser(search: $search)
         case .artists: ArtistBrowser(search: search)
         case .albums: AlbumBrowser(search: search)
         case .favorites:
-            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites", resetKey: search)
+            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites", resetKey: search, scrollKey: "favorites", search: search)
                 .toolbar {
                     ToolbarItem {
                         Toggle(isOn: $model.syncFavorites) { Label("Sync favorites to iPhone", systemImage: "iphone.and.arrow.forward") }
                             .help("Send all favorites to your iPhone, whichever folder they're in")
                     }
                 }
-        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false, resetKey: search)
-        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false, resetKey: search)
-        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false, resetKey: search)
+        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false, resetKey: search, scrollKey: "mostPlayed", search: search)
+        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false, resetKey: search, scrollKey: "recentlyPlayed", search: search)
+        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false, resetKey: search, scrollKey: "recentlyAdded", search: search)
         case .youtube: YouTubeView(search: search)
         case .duplicates: DuplicatesView(search: search)
         case .stats: StatsView()
