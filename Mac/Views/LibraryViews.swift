@@ -7,6 +7,9 @@ struct TrackTable: View {
     let tracks: [Track]
     var title: String = ""
     var defaultSort = true
+    /// What the rows depend on besides library growth (search text, folder…). When it changes the
+    /// table is rebuilt instead of diffed; a song arriving from a download still updates in place.
+    var resetKey: String = ""
     @State private var sortOrder: [KeyPathComparator<Track>] = []
     @State private var selection = Set<Track.ID>()
     @State private var confirmFavorite = false
@@ -32,6 +35,10 @@ struct TrackTable: View {
             TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45)
             TableColumn("Format", value: \.fileExtension).width(50)
         }
+        // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
+        // table instead of letting it diff thousands of rows on the main thread (the beachball).
+        // Property changes (hearts, play counts) keep the same identity and update in place.
+        .id(TableIdentity.of(resetKey, title, "\(sortOrder)"))
         .contextMenu(forSelectionType: Track.ID.self) { ids in
             let picked = rows.filter { ids.contains($0.id) }
             Button("Play") { play(picked.first, in: rows) }
@@ -128,7 +135,7 @@ struct FolderBrowser: View {
                 }
                 .frame(minHeight: folders.isEmpty ? 0 : 120)
                 .overlay { if !query.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: search) } }
-                TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name)
+                TrackTable(tracks: tracks, title: node.path.isEmpty ? "Folders" : node.name, resetKey: path + "\u{1}" + search)
                     .frame(minHeight: 150)
             }
         }
@@ -148,7 +155,7 @@ struct ArtistBrowser: View {
         let list = q.isEmpty ? store.artists : store.artists.filter { q.matches($0.searchFolded) }
         HSplitView {
             List(list, id: \.self, selection: $artist) { Text($0) }.frame(minWidth: 200, maxWidth: 320)
-            if let artist { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false) }
+            if let artist { TrackTable(tracks: store.tracks(artist: artist), title: artist, defaultSort: false, resetKey: artist) }
             else { ContentUnavailableView("Select an artist", systemImage: "music.mic").frame(maxWidth: .infinity) }
         }
     }
@@ -166,7 +173,7 @@ struct AlbumBrowser: View {
             List(list, selection: $album) { a in
                 VStack(alignment: .leading) { Text(a.album); Text(a.artist).font(.caption).foregroundStyle(.secondary) }.tag(a)
             }.frame(minWidth: 220, maxWidth: 340)
-            if let album { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false) }
+            if let album { TrackTable(tracks: store.tracks(album: album), title: album.album, defaultSort: false, resetKey: album.id) }
             else { ContentUnavailableView("Select an album", systemImage: "square.stack").frame(maxWidth: .infinity) }
         }
     }
@@ -238,5 +245,15 @@ struct QueueView: View {
                 .onDelete { player.removeFromQueue(at: $0) }
             }
         }
+    }
+}
+
+/// `.id` for a big table: changes when the user changes what the table shows (search, view,
+/// folder, sort), so SwiftUI builds it fresh instead of diffing thousands of rows on the main thread.
+enum TableIdentity {
+    static func of(_ parts: String...) -> Int {
+        var h = Hasher()
+        parts.forEach { h.combine($0) }
+        return h.finalize()
     }
 }

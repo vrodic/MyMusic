@@ -259,7 +259,7 @@ final class AppModel: ObservableObject {
         }
         try? db.upsert(result.changed)
         try? db.delete(result.removed)
-        store.reload()
+        await store.reloadNow()
         isScanning = false
         web?.syncSoon()
         scanStatus = "\(result.total) tracks · \(result.changed.count) updated · \(result.removed.count) removed"
@@ -346,8 +346,7 @@ final class AppModel: ObservableObject {
 
     /// Called after the web player's stats were stored (favorites may have changed).
     func afterWebPull() {
-        store.reload()
-        player.refreshAll(store.track)
+        Task { await store.reloadNow(); player.refreshAll(store.track) }
         devices = db.deviceBackups()
     }
 

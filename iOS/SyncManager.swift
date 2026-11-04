@@ -182,7 +182,7 @@ final class SyncManager: ObservableObject {
         applyPendingRestore()
         // Favorites: take the Mac's state where it changed more recently (the Mac already merged ours).
         let favChanges = model.db.applyRemoteFavorites(manifest.tracks.map { ($0.relPath, $0.favorite, $0.favoriteAt) })
-        model.store.reload()
+        await model.store.reloadNow()
         model.player.refreshAll(model.store.track)
         if !Task.isCancelled {
             lastSync = Date().timeIntervalSince1970

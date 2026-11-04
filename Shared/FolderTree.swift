@@ -83,8 +83,17 @@ final class FolderNode: Identifiable, Hashable {
 struct FolderSelection: Codable, Equatable {
     var paths: Set<String> = []
 
+    /// Is this path, or any folder above it, selected? Checks each ancestor in the set
+    /// (a few lookups) instead of comparing against every selected path.
     func contains(relPath: String) -> Bool {
-        paths.contains { $0.isEmpty || relPath == $0 || relPath.hasPrefix($0 + "/") }
+        if paths.isEmpty { return false }
+        if paths.contains("") || paths.contains(relPath) { return true }
+        var i = relPath.startIndex
+        while let slash = relPath[i...].firstIndex(of: "/") {
+            if paths.contains(String(relPath[..<slash])) { return true }
+            i = relPath.index(after: slash)
+        }
+        return false
     }
 
     func isSelected(_ folder: String) -> Bool { contains(relPath: folder) }

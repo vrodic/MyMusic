@@ -4,6 +4,8 @@ import SwiftUI
 struct MyMusicMacApp: App {
     @StateObject private var model = AppModel()
 
+    init() { HangRecorder.shared.start() }
+
     var body: some Scene {
         WindowGroup("MyMusic") {
             ContentView()
@@ -127,21 +129,21 @@ struct ContentView: View {
     @ViewBuilder private var detail: some View {
         // The toolbar search filters whatever section is open (it used to replace it).
         switch selection ?? .songs {
-        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”")
+        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search)
         case .folders: FolderBrowser(search: $search)
         case .artists: ArtistBrowser(search: search)
         case .albums: AlbumBrowser(search: search)
         case .favorites:
-            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites")
+            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites", resetKey: search)
                 .toolbar {
                     ToolbarItem {
                         Toggle(isOn: $model.syncFavorites) { Label("Sync favorites to iPhone", systemImage: "iphone.and.arrow.forward") }
                             .help("Send all favorites to your iPhone, whichever folder they're in")
                     }
                 }
-        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false)
-        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false)
-        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false)
+        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false, resetKey: search)
+        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false, resetKey: search)
+        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false, resetKey: search)
         case .youtube: YouTubeView(search: search)
         case .duplicates: DuplicatesView(search: search)
         case .stats: StatsView()

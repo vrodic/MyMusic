@@ -58,6 +58,7 @@ struct YouTubeView: View {
                     }.labelsHidden().disabled(i.status == .done)
                 }.width(150)
             }
+            .id(TableIdentity.of(filter.rawValue, search, "\(sortOrder)"))
             .contextMenu(forSelectionType: YTItem.ID.self) { ids in
                 Menu("Priority") {
                     ForEach(YTPriority.allCases.reversed()) { p in Button(p.label) { yt.setPriority(ids, p) } }
@@ -88,7 +89,7 @@ struct YouTubeView: View {
             }
         }
         .overlay {
-            if !yt.items.isEmpty && rows.isEmpty && !search.isEmpty {
+            if !yt.items.isEmpty && !search.isEmpty && !SearchQuery(search).isEmpty && rowsAreEmpty {
                 ContentUnavailableView.search(text: search)
             } else if yt.items.isEmpty {
                 ContentUnavailableView {
@@ -108,11 +109,11 @@ struct YouTubeView: View {
             sortOrder = old.filter { $0.keyPath != \YTItem.favoriteSort }
             if rows.count > 25 { confirmFavorite = true } else { toggleAllFavorites() }
         }
-        .confirmationDialog(allRowsFavorite ? "Remove all \(rows.count) listed songs from favorites?" : "Mark all \(rows.count) listed songs as favorites?",
+        .confirmationDialog(confirmFavorite ? (allRowsFavorite ? "Remove all \(rows.count) listed songs from favorites?" : "Mark all \(rows.count) listed songs as favorites?") : "",
                             isPresented: $confirmFavorite, titleVisibility: .visible) {
             Button(allRowsFavorite ? "Unfavorite All" : "Favorite All") { toggleAllFavorites() }
         } message: {
-            if !allRowsFavorite { Text("Songs that aren't downloaded yet get Maximum priority.") }
+            Text("Songs that aren't downloaded yet get Maximum priority.")
         }
         .navigationTitle("YouTube Liked Music")
         .sheet(isPresented: $showLog) {
@@ -149,7 +150,9 @@ struct YouTubeView: View {
         }
     }
 
-    private var allRowsFavorite: Bool { !rows.isEmpty && rows.allSatisfy(model.isFavorite) }
+    // computed only when actually needed (the dialog), not on every redraw
+    private var allRowsFavorite: Bool { let r = rows; return !r.isEmpty && r.allSatisfy(model.isFavorite) }
+    private var rowsAreEmpty: Bool { rows.isEmpty }
     private func toggleAllFavorites() { model.setYTFavorite(rows, !allRowsFavorite) }
 
     private func errorBanner(_ err: String) -> some View {
