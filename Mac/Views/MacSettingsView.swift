@@ -12,8 +12,20 @@ struct MacSettingsView: View {
         Form {
             Section("Library") {
                 LabeledContent("Music root", value: model.musicRoot?.path ?? "Not set")
-                Button("Change Music Root…") { model.chooseRoot() }
+                if model.musicRoot != nil {
+                    LabeledContent("Status", value: model.isRootAvailable ? "Available" : "Unavailable (unmounted or missing)")
+                }
+                HStack {
+                    Button("Change Music Root…") { model.chooseRoot() }
+                    if model.musicRoot != nil && !model.isRootAvailable {
+                        Button("Check Again") { model.checkRootAvailability() }
+                    }
+                }
                 LabeledContent("Database", value: AppModel.supportDir.appendingPathComponent("library.sqlite").path)
+                HStack(spacing: 12) {
+                    Button("Backup Database Now") { model.backupDatabaseNow(reveal: true) }
+                    Button("Restore Database Backup…") { model.promptRestoreDatabase() }
+                }
             }
             Section("Server") {
                 TextField("Bonjour name", text: $model.serverName)
