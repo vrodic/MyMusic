@@ -50,8 +50,8 @@ struct YouTubeView: View {
                         if !i.inPlaylist { Text("unliked").font(.caption2).padding(.horizontal, 4).background(.quaternary, in: Capsule()) }
                     }
                 }
-                TableColumn("Artist / Channel") { Text($0.uploader ?? "") }
-                TableColumn("Time") { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55)
+                TableColumn("Artist / Channel", value: \.uploaderSort) { Text($0.uploader ?? "") }
+                TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55)
                 TableColumn("Status") { i in statusView(i) }.width(130)
                 TableColumn("Priority", value: \.priority.rawValue) { i in
                     Picker("", selection: Binding(get: { i.priority }, set: { yt.setPriority([i.id], $0) })) {
