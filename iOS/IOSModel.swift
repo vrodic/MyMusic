@@ -30,6 +30,11 @@ final class IOSModel: ObservableObject {
 
     init() {
         try? FileManager.default.createDirectory(at: Self.musicDir, withIntermediateDirectories: true)
+        var musicURL = Self.musicDir
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? musicURL.setResourceValues(values)
+
         db = try! LibraryDB(path: Self.supportDir.appendingPathComponent("library.sqlite").path,
                             extraMigrations: [LibraryDB.favoriteAtMigration])
         db.currentUser = UserDefaults.standard.string(forKey: "currentUser") ?? SyncStore.defaultUserID
