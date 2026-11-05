@@ -32,6 +32,8 @@ struct YTItem: Identifiable, Hashable {
     var matchScore: Double?
     var matchOverride = false       // you said: download it anyway
     var favoriteSort: Int { favorite ? 1 : 0 }
+    var uploaderSort: String { (uploader ?? "").localizedLowercase }
+    var durationSort: Double { duration ?? 0 }
     var id: String { videoID }
     /// Probably already in the library, so it won't be downloaded (unless you override).
     var likelyInLibrary: Bool { !matchOverride && status != .done && (matchScore ?? 0) >= YTLibraryMatcher.likelyThreshold }
