@@ -18,6 +18,7 @@ struct TrackTable: View {
     var revealPlace: RevealRequest.Place? = nil
     /// Set when showing a playlist: adds Remove / Move to Top.
     var playlistID: String? = nil
+    @AppStorage("mac.trackTableColumns") private var columnCustomization: TableColumnCustomization<Track>
     @State private var sortOrder: [KeyPathComparator<Track>] = []
     @State private var selection = Set<Track.ID>()
     @State private var confirmFavorite = false
@@ -30,25 +31,53 @@ struct TrackTable: View {
 
     var body: some View {
         let rows = sorted
-        Table(rows, selection: $selection, sortOrder: $sortOrder) {
+        Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             TableColumn("♥", value: \.favoriteSort) { t in
                 Button { model.toggleFavorite(t) } label: {
                     Image(systemName: t.favorite ? "heart.fill" : "heart").foregroundStyle(t.favorite ? .pink : .secondary)
                 }.buttonStyle(.plain)
-            }.width(22)
+            }
+            .width(22)
+            .customizationID("favorite")
             TableColumn("Title", value: \.title) { t in
                 Text(t.title).fontWeight(player.current?.relPath == t.relPath ? .bold : .regular)
             }
+            .customizationID("title")
+            .disabledCustomizationBehavior(.visibility)
             TableColumn("Artist", value: \.displayArtist)
+                .customizationID("artist")
             TableColumn("Album", value: \.displayAlbum)
-            TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55)
-            TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45)
-            TableColumn("Format", value: \.fileExtension).width(50)
+                .customizationID("album")
+            TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }
+                .width(55)
+                .customizationID("time")
+            TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }
+                .width(45)
+                .customizationID("plays")
+            TableColumn("Format", value: \.fileExtension)
+                .width(50)
+                .customizationID("format")
             TableColumn("Favorited", value: \.favoritedSort) { t in
                 if t.favorite, let at = t.favoriteAt {
                     Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
                 }
-            }.width(90)
+            }
+            .width(90)
+            .customizationID("favorited")
+            TableColumn("Added", value: \.addedAt) { t in
+                if t.addedAt > 0 {
+                    Text(Date(timeIntervalSince1970: t.addedAt), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                }
+            }
+            .width(90)
+            .customizationID("added")
+            TableColumn("Last played", value: \.lastPlayedSort) { t in
+                if let at = t.lastPlayed, at > 0 {
+                    Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                }
+            }
+            .width(90)
+            .customizationID("lastPlayed")
         }
         // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
         // table instead of letting it diff thousands of rows on the main thread (the beachball).
@@ -165,6 +194,24 @@ struct TrackTable: View {
 }
 
 extension Track { var durationSort: Double { duration ?? 0 } }
+
+extension TableColumnCustomization: @retroactive RawRepresentable {
+    public init?(rawValue: String) {
+        guard let data = rawValue.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(TableColumnCustomization<RowValue>.self, from: data) else {
+            return nil
+        }
+        self = decoded
+    }
+
+    public var rawValue: String {
+        guard let data = try? JSONEncoder().encode(self),
+              let string = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return string
+    }
+}
 
 struct FolderBrowser: View {
     @EnvironmentObject var store: LibraryStore
