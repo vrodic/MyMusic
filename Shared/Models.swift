@@ -43,6 +43,8 @@ struct Track: Codable, Hashable, Identifiable {
     var favoriteSort: Int { favorite ? 1 : 0 }
     /// When it was favorited (0 if it isn't a favorite or the time is unknown), for sorting.
     var favoritedSort: Double { favorite ? favoriteAt ?? 0 : 0 }
+    /// When it was last played (0 if never played), for sorting.
+    var lastPlayedSort: Double { lastPlayed ?? 0 }
     var displayArtist: String { artist ?? albumArtist ?? "Unknown Artist" }
     var displayAlbum: String { album ?? "Unknown Album" }
     var folder: String { (relPath as NSString).deletingLastPathComponent }

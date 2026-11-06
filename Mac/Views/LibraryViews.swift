@@ -23,6 +23,7 @@ struct TrackTable: View {
     @State private var confirmFavorite = false
     @State private var confirmDelete = false
     @State private var tracksPendingDelete: [Track] = []
+    @AppStorage("mac.trackTableColumns") private var columnCustomization = TableColumnCustomization<Track>()
 
     /// Always show the store's current copy, so hearts and play counts update in folder/album lists too.
     private var live: [Track] { tracks.map { store.track($0.relPath) ?? $0 } }
@@ -30,25 +31,35 @@ struct TrackTable: View {
 
     var body: some View {
         let rows = sorted
-        Table(rows, selection: $selection, sortOrder: $sortOrder) {
+        Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             TableColumn("♥", value: \.favoriteSort) { t in
                 Button { model.toggleFavorite(t) } label: {
                     Image(systemName: t.favorite ? "heart.fill" : "heart").foregroundStyle(t.favorite ? .pink : .secondary)
                 }.buttonStyle(.plain)
-            }.width(22)
+            }.width(22).customizationID("favorite")
             TableColumn("Title", value: \.title) { t in
                 Text(t.title).fontWeight(player.current?.relPath == t.relPath ? .bold : .regular)
-            }
-            TableColumn("Artist", value: \.displayArtist)
-            TableColumn("Album", value: \.displayAlbum)
-            TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55)
-            TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45)
-            TableColumn("Format", value: \.fileExtension).width(50)
+            }.customizationID("title")
+            TableColumn("Artist", value: \.displayArtist).customizationID("artist")
+            TableColumn("Album", value: \.displayAlbum).customizationID("album")
+            TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55).customizationID("time")
+            TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45).customizationID("plays")
+            TableColumn("Format", value: \.fileExtension).width(50).customizationID("format")
             TableColumn("Favorited", value: \.favoritedSort) { t in
                 if t.favorite, let at = t.favoriteAt {
                     Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
                 }
-            }.width(90)
+            }.width(90).customizationID("favorited")
+            TableColumn("Added", value: \.addedAt) { t in
+                if t.addedAt > 0 {
+                    Text(Date(timeIntervalSince1970: t.addedAt), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                }
+            }.width(90).customizationID("added")
+            TableColumn("Last played", value: \.lastPlayedSort) { t in
+                if let at = t.lastPlayed, at > 0 {
+                    Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                }
+            }.width(90).customizationID("lastPlayed")
         }
         // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
         // table instead of letting it diff thousands of rows on the main thread (the beachball).
