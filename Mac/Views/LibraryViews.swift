@@ -57,8 +57,11 @@ struct TrackTable: View {
         let rows = sorted
         Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             TableColumn("♥", value: \.favoriteSort) { t in
-                Button { toggleFavoriteTrack(t) } label: {
-                    Image(systemName: t.favorite ? "heart.fill" : "heart").foregroundStyle(t.favorite ? .pink : .secondary)
+                // Look up the live copy so the heart reflects in-place favorite toggles
+                // even when the table was built from a stale snapshot (e.g. FolderNode.tracks).
+                let live = store.track(t.relPath) ?? t
+                Button { toggleFavoriteTrack(live) } label: {
+                    Image(systemName: live.favorite ? "heart.fill" : "heart").foregroundStyle(live.favorite ? .pink : .secondary)
                 }.buttonStyle(.plain)
             }.width(22).customizationID("favorite")
             TableColumn("Title", value: \.title) { t in

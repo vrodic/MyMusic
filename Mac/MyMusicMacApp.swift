@@ -85,6 +85,10 @@ struct ContentView: View {
     /// Sidebar selection: a SidebarItem's raw value, or "pl:<playlist id>".
     @State private var selectionKey: String?
     @State private var search = ""
+    /// Debounced copy of `search` — updated 150 ms after the user stops typing so filtering
+    /// large libraries doesn't block the main thread on every keystroke.
+    @State private var debouncedSearch = ""
+    @State private var searchDebounceTask: Task<Void, Never>? = nil
     @State private var isSearchFocused = false
     @AppStorage("mac.folderPath") private var folderPath = ""   // FolderBrowser's open folder
 
@@ -149,6 +153,20 @@ struct ContentView: View {
             }
         }
         .searchable(text: $search, isPresented: $isSearchFocused, placement: .toolbar, prompt: searchPrompt)
+        .onChange(of: search) { _, new in
+            // Debounce: cancel any pending update and schedule a new one 150 ms out,
+            // so filter / sort work doesn't run on every keystroke in large libraries.
+            searchDebounceTask?.cancel()
+            if new.isEmpty {
+                debouncedSearch = ""   // clear immediately so results disappear at once
+            } else {
+                searchDebounceTask = Task {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled else { return }
+                    debouncedSearch = new
+                }
+            }
+        }
         .onKeyPress(phases: .down) { press in
             guard press.modifiers.isEmpty || press.modifiers == .shift else { return .ignored }
             guard let ch = press.characters.first, press.characters.count == 1, ch.isLetter || ch.isNumber else {
@@ -206,8 +224,8 @@ struct ContentView: View {
 
     @ViewBuilder private var detail: some View {
         if let p = selectedPlaylist {
-            TrackTable(tracks: store.filter(model.tracks(in: p), search), title: p.name, defaultSort: false,
-                       resetKey: p.id + "\u{1}" + search, scrollKey: "pl:" + p.id, search: search, playlistID: p.id)
+            TrackTable(tracks: store.filter(model.tracks(in: p), debouncedSearch), title: p.name, defaultSort: false,
+                       resetKey: p.id + "\u{1}" + debouncedSearch, scrollKey: "pl:" + p.id, search: debouncedSearch, playlistID: p.id)
         } else {
             sectionDetail
         }
@@ -216,26 +234,26 @@ struct ContentView: View {
     @ViewBuilder private var sectionDetail: some View {
         // The toolbar search filters whatever section is open (it used to replace it).
         switch selection ?? .songs {
-        case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search,
-                               scrollKey: "songs", search: search, revealPlace: search.isEmpty ? .songs : nil, persistSortKey: "mac.songsSortOrder")
-        case .folders: FolderBrowser(search: $search)
-        case .artists: ArtistBrowser(search: search)
-        case .albums: AlbumBrowser(search: search)
+        case .songs: TrackTable(tracks: store.search(debouncedSearch), title: debouncedSearch.isEmpty ? "Songs" : "Songs matching “\(debouncedSearch)”", resetKey: debouncedSearch,
+                               scrollKey: "songs", search: debouncedSearch, revealPlace: debouncedSearch.isEmpty ? .songs : nil, persistSortKey: "mac.songsSortOrder")
+        case .folders: FolderBrowser(search: $debouncedSearch)
+        case .artists: ArtistBrowser(search: debouncedSearch)
+        case .albums: AlbumBrowser(search: debouncedSearch)
         case .favorites:
-            TrackTable(tracks: store.filter(store.favorites, search), title: "Favorites", resetKey: search, scrollKey: "favorites", search: search)
+            TrackTable(tracks: store.filter(store.favorites, debouncedSearch), title: "Favorites", resetKey: debouncedSearch, scrollKey: "favorites", search: debouncedSearch)
                 .toolbar {
                     ToolbarItem {
                         Toggle(isOn: $model.syncFavorites) { Label("Sync favorites to iPhone", systemImage: "iphone.and.arrow.forward") }
                             .help("Send all favorites to your iPhone, whichever folder they're in")
                     }
                 }
-        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, search), title: "Most Played", defaultSort: false, resetKey: search, scrollKey: "mostPlayed", search: search)
-        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, search), title: "Recently Played", defaultSort: false, resetKey: search, scrollKey: "recentlyPlayed", search: search)
-        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, search), title: "Recently Added", defaultSort: false, resetKey: search, scrollKey: "recentlyAdded", search: search)
-        case .youtube: YouTubeView(search: search)
-        case .duplicates: DuplicatesView(search: search)
+        case .mostPlayed: TrackTable(tracks: store.filter(store.mostPlayed, debouncedSearch), title: "Most Played", defaultSort: false, resetKey: debouncedSearch, scrollKey: "mostPlayed", search: debouncedSearch)
+        case .recentlyPlayed: TrackTable(tracks: store.filter(store.recentlyPlayed, debouncedSearch), title: "Recently Played", defaultSort: false, resetKey: debouncedSearch, scrollKey: "recentlyPlayed", search: debouncedSearch)
+        case .recentlyAdded: TrackTable(tracks: store.filter(store.recentlyAdded, debouncedSearch), title: "Recently Added", defaultSort: false, resetKey: debouncedSearch, scrollKey: "recentlyAdded", search: debouncedSearch)
+        case .youtube: YouTubeView(search: debouncedSearch)
+        case .duplicates: DuplicatesView(search: debouncedSearch)
         case .stats: StatsView()
-        case .sync: SyncView(search: $search)
+        case .sync: SyncView(search: $debouncedSearch)
         }
     }
 
