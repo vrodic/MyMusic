@@ -153,6 +153,7 @@ final class AppModel: ObservableObject {
     @Published var revealRequest: RevealRequest?
     func reveal(_ t: Track, in place: RevealRequest.Place) { revealRequest = RevealRequest(relPath: t.relPath, place: place) }
     @Published private(set) var musicRoot: URL?
+    @Published private(set) var isRootAvailable = false
     /// Music root is on SMB/AFP/NFS: avoid optional file-system calls.
     @Published private(set) var rootIsRemote = false
     // Sync choices belong to the current user (and replicate to the other Macs).
@@ -254,9 +255,6 @@ final class AppModel: ObservableObject {
             db.publishYT(db.ytItems().map(\.videoID), user: true, download: true, info: true)
             db.sync.setFlag("ytPublished")
         }
-        startServer()
-        checkRemote()
-        yt.start()
         web = WebPeer(model: self)
         currentUser = db.currentUser
         serverNameSnapshot = serverName
@@ -271,9 +269,45 @@ final class AppModel: ObservableObject {
         loadUser()
         peers = PeerSync(model: self)
         backend.onSyncApplied = { [weak self] res in Task { @MainActor in self?.afterSyncApplied(res) } }
-        if musicRoot != nil {
-            player.restoreState(lookup: store.track)   // pick up where you left off
-            Task { await rescan() }
+
+        if let root = musicRoot {
+            let reachable = Self.isFolderReachable(root)
+            isRootAvailable = reachable
+            if reachable {
+                startServer()
+                checkRemote()
+                yt.start()
+                player.restoreState(lookup: store.track)   // pick up where you left off
+                Task { await rescan() }
+            }
+        }
+    }
+
+    static func isFolderReachable(_ url: URL) -> Bool {
+        (try? url.checkResourceIsReachable()) == true
+    }
+
+    /// Starts network server, YouTube manager, and remote check when root is available.
+    private func startServices() {
+        startServer()
+        checkRemote()
+        yt.start()
+    }
+
+    /// Re-check if the configured musicRoot folder is mounted and reachable.
+    func checkRootAvailability() {
+        guard let root = musicRoot else { isRootAvailable = false; return }
+        let reachable = Self.isFolderReachable(root)
+        if reachable {
+            let wasUnavailable = !isRootAvailable
+            isRootAvailable = true
+            startServices()
+            if wasUnavailable {
+                player.restoreState(lookup: store.track)
+                Task { await rescan() }
+            }
+        } else {
+            isRootAvailable = false
         }
     }
 
@@ -457,7 +491,72 @@ final class AppModel: ObservableObject {
 
     // MARK: root & scanning
 
+    /// Creates a local backup of the SQLite database in Application Support/MyMusic/Backups/ and reveals it in Finder.
+    @discardableResult
+    func backupDatabaseNow(reveal: Bool = true) -> URL? {
+        let backupsDir = Self.supportDir.appendingPathComponent("Backups", isDirectory: true)
+        try? FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let timestamp = formatter.string(from: Date())
+        let backupURL = backupsDir.appendingPathComponent("library-\(timestamp).sqlite")
+        db.saveSettingsForBackup()
+        do {
+            try db.db.snapshot(to: backupURL.path)
+            if reveal {
+                NSWorkspace.shared.activateFileViewerSelecting([backupURL])
+            }
+            return backupURL
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Database Backup Failed"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return nil
+        }
+    }
+
+    /// Opens an NSOpenPanel to let the user select a database file to restore from.
+    func promptRestoreDatabase() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = []
+        panel.allowsOtherFileTypes = true
+        panel.prompt = "Restore"
+        panel.message = "Select a MyMusic database file (.sqlite) to restore."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try restoreLibrary(from: url.path)
+            let alert = NSAlert()
+            alert.messageText = "Database Restored"
+            alert.informativeText = "The library database has been successfully restored."
+            alert.runModal()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Database Restore Failed"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
     func chooseRoot() {
+        // If there's an existing database with tracks or an existing music root, ask if they want to backup first
+        if musicRoot != nil || !store.tracks.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Backup Current Library Database?"
+            alert.informativeText = "Would you like to make a backup copy of your current database before changing the music root directory?"
+            alert.addButton(withTitle: "Backup & Continue")
+            alert.addButton(withTitle: "Continue Without Backup")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response == .alertThirdButtonReturn {
+                return
+            } else if response == .alertFirstButtonReturn {
+                backupDatabaseNow(reveal: true)
+            }
+        }
+
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -470,12 +569,15 @@ final class AppModel: ObservableObject {
     /// Use `url` as the music root: save it, point the server at it, and scan.
     func setRoot(_ url: URL) async {
         musicRoot = url
+        isRootAvailable = Self.isFolderReachable(url)
         UserDefaults.standard.set(url.path, forKey: "musicRoot")
         pushBackend()
-        checkRemote()
-        await rescan()
-        if selection.paths.isEmpty && !syncFavorites {
-            selection = FolderSelection(paths: Set(store.folderRoot.subfolders.map(\.path)))
+        if isRootAvailable {
+            startServices()
+            await rescan()
+            if selection.paths.isEmpty && !syncFavorites {
+                selection = FolderSelection(paths: Set(store.folderRoot.subfolders.map(\.path)))
+            }
         }
     }
 
@@ -494,7 +596,7 @@ final class AppModel: ObservableObject {
     }
 
     func rescan() async {
-        guard let root = musicRoot, !isScanning else { return }
+        guard let root = musicRoot, isRootAvailable, !isScanning else { return }
         isScanning = true; scanStatus = "Scanning…"
         let known = db.fileStamps()
         let result = await AudioScanner.scan(root: root, known: known, origin: .server) { done, total in

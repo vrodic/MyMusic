@@ -27,12 +27,61 @@ struct WelcomeView: View {
                     }
                 }
 
-                VStack(spacing: 6) {
-                    Button("Choose Music Folder…") { model.chooseRoot() }.disabled(setup.isRunning)
-                    Text("Pick the root of your music collection yourself. YouTube downloads go into <root>/yt.")
-                        .font(.caption).foregroundStyle(.secondary)
+                if let root = model.musicRoot, !model.isRootAvailable {
+                    VStack(spacing: 12) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.title)
+                                .foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Music Root Folder Unavailable")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text("The configured music folder cannot be reached. It may be an unmounted network share or an external drive that is disconnected:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(root.path)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .padding(14)
+                        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.3), lineWidth: 1))
+                        .frame(maxWidth: 540)
+
+                        HStack(spacing: 12) {
+                            Button("Check Again") {
+                                model.checkRootAvailability()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Choose Another Folder…") {
+                                model.chooseRoot()
+                            }
+                            .disabled(setup.isRunning)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    VStack(spacing: 6) {
+                        Button("Choose Music Folder…") { model.chooseRoot() }.disabled(setup.isRunning)
+                        Text("Pick the root of your music collection yourself. YouTube downloads go into <root>/yt.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 10)
                 }
-                .padding(.top, 10)
+
+                VStack(spacing: 6) {
+                    Button("Restore Database Backup…") {
+                        model.promptRestoreDatabase()
+                    }
+                    .buttonStyle(.link)
+                    Text("Restore a previously backed up SQLite database.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
             }
             .padding(40)
             .frame(maxWidth: .infinity)
