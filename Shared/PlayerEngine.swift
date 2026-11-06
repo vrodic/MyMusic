@@ -40,13 +40,19 @@ final class TrackMemoryCache: @unchecked Sendable {
     }
 }
 
-/// Serves in-memory audio data to AVPlayer without disk or network I/O.
+/// Serves in-memory audio data to AVPlayer without disk or network I/O, supporting progressive streaming.
 final class MemoryResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
-    private let data: Data
+    private let lock = NSLock()
+    private var data: Data
+    private let expectedContentLength: Int64
     private let contentType: String?
+    private var isComplete: Bool
+    private var pendingRequests: [AVAssetResourceLoadingRequest] = []
 
     init(data: Data, fileExtension: String) {
         self.data = data
+        self.expectedContentLength = Int64(data.count)
+        self.isComplete = true
         if let utType = UTType(filenameExtension: fileExtension) {
             self.contentType = utType.identifier
         } else {
@@ -55,33 +61,102 @@ final class MemoryResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unch
         super.init()
     }
 
+    init(expectedLength: Int64, fileExtension: String, initialData: Data = Data()) {
+        self.data = initialData
+        self.expectedContentLength = expectedLength
+        self.isComplete = false
+        if let utType = UTType(filenameExtension: fileExtension) {
+            self.contentType = utType.identifier
+        } else {
+            self.contentType = nil
+        }
+        super.init()
+    }
+
+    var currentData: Data {
+        lock.withLock { data }
+    }
+
+    func append(chunk: Data) {
+        lock.withLock {
+            data.append(chunk)
+            processPendingRequestsLocked()
+        }
+    }
+
+    func markComplete() {
+        lock.withLock {
+            isComplete = true
+            processPendingRequestsLocked()
+        }
+    }
+
+    func cancelAll() {
+        lock.withLock {
+            for req in pendingRequests where !req.isFinished {
+                req.finishLoading(with: URLError(.cancelled))
+            }
+            pendingRequests.removeAll()
+        }
+    }
+
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        lock.withLock {
+            processRequestLocked(loadingRequest)
+            if !loadingRequest.isFinished {
+                pendingRequests.append(loadingRequest)
+            }
+        }
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+        lock.withLock {
+            pendingRequests.removeAll { $0 === loadingRequest }
+        }
+    }
+
+    private func processRequestLocked(_ loadingRequest: AVAssetResourceLoadingRequest) {
         if let contentRequest = loadingRequest.contentInformationRequest {
             contentRequest.isByteRangeAccessSupported = true
-            contentRequest.contentLength = Int64(data.count)
+            contentRequest.contentLength = max(expectedContentLength, Int64(data.count))
             if let contentType {
                 contentRequest.contentType = contentType
             }
         }
 
         if let dataRequest = loadingRequest.dataRequest {
-            let offset = Int(dataRequest.requestedOffset)
-            let length = dataRequest.requestedLength
+            let offset = Int(dataRequest.currentOffset)
+            let requestedOffset = Int(dataRequest.requestedOffset)
+            let requestedLength = dataRequest.requestedLength
+            let targetEnd = requestedOffset + requestedLength
+
             if offset < data.count {
-                let bytesToProvide = min(length, data.count - offset)
-                let subdata = data.subdata(in: offset..<(offset + bytesToProvide))
-                dataRequest.respond(with: subdata)
-                loadingRequest.finishLoading()
-            } else {
+                let available = min(targetEnd - offset, data.count - offset)
+                if available > 0 {
+                    let sub = data.subdata(in: offset..<(offset + available))
+                    dataRequest.respond(with: sub)
+                }
+            }
+
+            if Int(dataRequest.currentOffset) >= targetEnd || (isComplete && Int(dataRequest.currentOffset) >= data.count) {
                 loadingRequest.finishLoading()
             }
         } else {
             loadingRequest.finishLoading()
         }
-        return true
     }
 
-    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+    private func processPendingRequestsLocked() {
+        var remaining: [AVAssetResourceLoadingRequest] = []
+        for req in pendingRequests {
+            if req.isCancelled { continue }
+            processRequestLocked(req)
+            if !req.isFinished {
+                remaining.append(req)
+            }
+        }
+        pendingRequests = remaining
     }
 }
 
@@ -197,7 +272,13 @@ final class PlayerEngine: ObservableObject {
 
     func removeTracks(_ paths: Set<String>) {
         for p in paths { memoryCache.remove(for: p) }
-        if let cur = current, paths.contains(cur.relPath) {
+        guard let cur = current else {
+            queue.removeAll { paths.contains($0.relPath) }
+            originalQueue.removeAll { paths.contains($0.relPath) }
+            index = 0
+            return
+        }
+        if paths.contains(cur.relPath) {
             stop()
             return
         }
@@ -206,7 +287,11 @@ final class PlayerEngine: ObservableObject {
         if queue.isEmpty {
             stop()
         } else {
-            if index >= queue.count { index = max(0, queue.count - 1) }
+            if let newIdx = queue.firstIndex(where: { $0.relPath == cur.relPath }) {
+                index = newIdx
+            } else {
+                index = max(0, min(index, queue.count - 1))
+            }
             saveState()
         }
     }
@@ -255,6 +340,7 @@ final class PlayerEngine: ObservableObject {
 
     func stop() {
         loadTask?.cancel(); prefetchTask?.cancel()
+        currentResourceLoader?.cancelAll()
         previousTrack = nil; memoryCache.removeAll(); currentResourceLoader = nil
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
         isPlaying = false; clock.time = 0; duration = 0; artwork = nil
@@ -358,15 +444,12 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
-    private func setupPlayerItem(with data: Data, for t: Track, autoplay: Bool) {
-        let ext = (t.relPath as NSString).pathExtension.lowercased()
-        let safeExt = ext.isEmpty ? "m4a" : ext
+    private func setupPlayerItem(with loader: MemoryResourceLoader, safeExt: String, for t: Track, autoplay: Bool) {
         guard let dummyURL = URL(string: "mymusic-mem://audio/\(UUID().uuidString).\(safeExt)") else {
             setupPlayerItemWithURL(url: urlFor(t), for: t, autoplay: autoplay)
             return
         }
         let asset = AVURLAsset(url: dummyURL)
-        let loader = MemoryResourceLoader(data: data, fileExtension: safeExt)
         currentResourceLoader = loader
         asset.resourceLoader.setDelegate(loader, queue: DispatchQueue.global(qos: .userInitiated))
         let item = AVPlayerItem(asset: asset)
@@ -413,21 +496,64 @@ final class PlayerEngine: ObservableObject {
         duration = t.duration ?? 0
         artwork = nil
         loadTask?.cancel()
+        currentResourceLoader?.cancelAll()
 
         let url = urlFor(t)
+        let ext = (t.relPath as NSString).pathExtension.lowercased()
+        let safeExt = ext.isEmpty ? "m4a" : ext
+
         if let cachedData = memoryCache.data(for: t.relPath) {
-            setupPlayerItem(with: cachedData, for: t, autoplay: autoplay)
+            let loader = MemoryResourceLoader(data: cachedData, fileExtension: safeExt)
+            setupPlayerItem(with: loader, safeExt: safeExt, for: t, autoplay: autoplay)
             updateCacheEvictionAndPrefetch()
         } else {
             loadTask = Task { [weak self] in
                 guard let self else { return }
-                let data = await Task.detached { try? Data(contentsOf: url) }.value
-                guard !Task.isCancelled else { return }
-                guard let cur = self.current, cur.relPath == t.relPath else { return }
-                if let data {
-                    self.memoryCache.set(data, for: t.relPath)
-                    self.setupPlayerItem(with: data, for: t, autoplay: autoplay)
+                let fileSize = t.size > 0 ? t.size : (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)) ?? 0
+                let safeThreshold = min(Int(fileSize > 0 ? fileSize : 256 * 1024), 256 * 1024)
+                let loader = MemoryResourceLoader(expectedLength: fileSize, fileExtension: safeExt)
+
+                let (readSuccess, started) = await Task.detached { () -> (Bool, Bool) in
+                    guard let handle = try? FileHandle(forReadingFrom: url) else { return (false, false) }
+                    defer { try? handle.close() }
+                    let chunkSize = 128 * 1024
+                    var didStart = false
+                    while !Task.isCancelled {
+                        let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
+                        if chunk.isEmpty { break }
+                        loader.append(chunk: chunk)
+                        if !didStart && loader.currentData.count >= safeThreshold {
+                            didStart = true
+                            Task { @MainActor [weak self] in
+                                guard let self, !Task.isCancelled, let cur = self.current, cur.relPath == t.relPath else { return }
+                                self.setupPlayerItem(with: loader, safeExt: safeExt, for: t, autoplay: autoplay)
+                            }
+                        }
+                    }
+                    if Task.isCancelled {
+                        loader.cancelAll()
+                        return (false, didStart)
+                    }
+                    loader.markComplete()
+                    return (true, didStart)
+                }.value
+
+                guard !Task.isCancelled else {
+                    loader.cancelAll()
+                    return
+                }
+                guard let cur = self.current, cur.relPath == t.relPath else {
+                    loader.cancelAll()
+                    return
+                }
+
+                if readSuccess {
+                    if !started {
+                        self.setupPlayerItem(with: loader, safeExt: safeExt, for: t, autoplay: autoplay)
+                    }
+                    self.memoryCache.set(loader.currentData, for: t.relPath)
                 } else {
+                    loader.cancelAll()
                     self.setupPlayerItemWithURL(url: url, for: t, autoplay: autoplay)
                 }
                 self.updateCacheEvictionAndPrefetch()
