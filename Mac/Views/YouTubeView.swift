@@ -114,11 +114,11 @@ struct YouTubeView: View {
         let c = yt.counts
         return HStack(spacing: 12) {
             Button { Task { await yt.refreshLiked() } } label: { Label("Refresh Liked", systemImage: "arrow.clockwise") }
-                .disabled(yt.isIndexing)
+                .disabled(yt.isIndexing || yt.isMatching)
             Button { yt.togglePause() } label: {
                 Label(yt.paused ? "Resume Downloads" : "Pause Downloads", systemImage: yt.paused ? "play.fill" : "pause.fill")
             }
-            if yt.isIndexing { ProgressView().controlSize(.small) }
+            if yt.isIndexing || yt.isMatching { ProgressView().controlSize(.small) }
             if yt.isCoolingDown {
                 Button("Resume Now") { yt.endCooldown() }.help("Ignore YouTube's rate limit and continue the queue")
             }

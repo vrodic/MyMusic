@@ -175,7 +175,8 @@ final class YouTubeManager: ObservableObject {
             lastError = nil
             reload()
             await checkLibraryMatches()
-            statusLine = "Indexed \(parsed.count) liked songs"
+            let likely = items.filter(\.likelyInLibrary).count
+            statusLine = "Indexed \(parsed.count) liked songs (\(likely) in library)"
             appendLog(statusLine)
             poke()
         } catch {
@@ -206,18 +207,34 @@ final class YouTubeManager: ObservableObject {
 
     // MARK: already in the library?
 
-    /// Fuzzy-match every liked song that isn't downloaded yet against your own songs. Likely
-    /// matches stop being downloaded; manual "in library" marks (score 1 with no path) are kept.
+    /// Fuzzy-match queued liked songs against your library, including existing YouTube downloads.
+    /// Does not change items that are already downloaded, skipped, or deleted.
     func checkLibraryMatches() async {
         guard !isMatching else { return }
         isMatching = true
-        defer { isMatching = false }
-        let library = libraryProvider().filter { $0.source != .youtube }
-        let pending = items.filter { $0.status != .done && !($0.matchScore == 1 && $0.libraryMatch == "") }
+        statusLine = "Checking library matches…"
+        defer {
+            isMatching = false
+            statusLine = ""
+        }
+        var allTracks = libraryProvider()
+        let existingPaths = Set(allTracks.map(\.relPath))
+        for it in items where it.status == .done {
+            if let rel = it.relPath, !existingPaths.contains(rel) {
+                let synthetic = Track(relPath: rel, size: 0, mtime: 0, title: it.title, artist: it.uploader, duration: it.duration, source: .youtube)
+                allTracks.append(synthetic)
+            }
+        }
+        let queued = items.filter {
+            $0.status != .done &&
+            $0.priority != .skip &&
+            $0.status != .deleted &&
+            !($0.matchScore == 1 && $0.libraryMatch == "")
+        }
         let results = await offMain { () -> [String: YTLibraryMatcher.Match?] in
-            let index = YTLibraryMatcher.Index(library: library)
+            let index = YTLibraryMatcher.Index(library: allTracks)
             var out: [String: YTLibraryMatcher.Match?] = [:]
-            for it in pending {
+            for it in queued {
                 out[it.videoID] = index.bestMatch(title: it.title, uploader: it.uploader, duration: it.duration,
                                                   threshold: YTLibraryMatcher.possibleThreshold)
             }
