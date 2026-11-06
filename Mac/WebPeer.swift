@@ -68,7 +68,7 @@ final class WebPeer: ObservableObject {
     }
 
     func sync() async {
-        guard !isSyncing, var push = request("api/peer/library") else { return }
+        guard !isSyncing, model.isRootAvailable, var push = request("api/peer/library") else { return }
         isSyncing = true
         defer { isSyncing = false }
         do {

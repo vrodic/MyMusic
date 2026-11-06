@@ -255,6 +255,7 @@ final class AppModel: ObservableObject {
             db.publishYT(db.ytItems().map(\.videoID), user: true, download: true, info: true)
             db.sync.setFlag("ytPublished")
         }
+        web = WebPeer(model: self)
         currentUser = db.currentUser
         serverNameSnapshot = serverName
         if !db.sync.flag("defaultUserNamed") {
@@ -266,13 +267,16 @@ final class AppModel: ObservableObject {
             db.sync.setFlag("defaultUserNamed")
         }
         loadUser()
+        peers = PeerSync(model: self)
         backend.onSyncApplied = { [weak self] res in Task { @MainActor in self?.afterSyncApplied(res) } }
 
         if let root = musicRoot {
             let reachable = Self.isFolderReachable(root)
             isRootAvailable = reachable
             if reachable {
-                startServices()
+                startServer()
+                checkRemote()
+                yt.start()
                 player.restoreState(lookup: store.track)   // pick up where you left off
                 Task { await rescan() }
             }
@@ -283,13 +287,11 @@ final class AppModel: ObservableObject {
         (try? url.checkResourceIsReachable()) == true
     }
 
-    /// Starts network server, YouTube manager, Web peer and peer sync when root is available.
+    /// Starts network server, YouTube manager, and remote check when root is available.
     private func startServices() {
         startServer()
         checkRemote()
         yt.start()
-        if web == nil { web = WebPeer(model: self) }
-        if peers == nil { peers = PeerSync(model: self) }
     }
 
     /// Re-check if the configured musicRoot folder is mounted and reachable.

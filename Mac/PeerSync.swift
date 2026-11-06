@@ -47,7 +47,7 @@ final class PeerSync: ObservableObject {
     }
 
     func syncAll() async {
-        guard !isSyncing else { return }
+        guard !isSyncing, model.isRootAvailable else { return }
         isSyncing = true
         defer { isSyncing = false }
         let me = model.db.sync.replicaID
