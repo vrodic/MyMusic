@@ -55,7 +55,13 @@ struct TrackTable: View {
         // Property changes (hearts, play counts) keep the same identity and update in place.
         .rememberScroll(scrollMemoryKey, resetOn: search)
         .id(TableIdentity.of(resetKey, title, "\(sortOrder)"))
-        .onAppear(perform: handleReveal)
+        .onAppear {
+            handleReveal()
+            if !selection.isEmpty { model.selectedTrackPaths = selection }
+        }
+        .onChange(of: selection) { _, new in
+            model.selectedTrackPaths = new
+        }
         .onChange(of: model.revealRequest) { handleReveal() }
         .contextMenu(forSelectionType: Track.ID.self) { ids in
             let picked = rows.filter { ids.contains($0.id) }
@@ -71,7 +77,10 @@ struct TrackTable: View {
                 Button("Remove from Playlist") { model.removeFromPlaylist(pid, picked) }
                 if let first = picked.first { Button("Move to Top") { model.movePlaylistItem(pid, first, toTop: true) } }
             }
-            if let first = picked.first { Button("Show in Finder") { model.revealInFinder(first) } }
+            if let first = picked.first {
+                Button("Show in Folder") { model.reveal(first, in: .folder) }
+                Button("Show in Finder") { model.revealInFinder(first) }
+            }
             Divider()
             Button(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song", role: .destructive) {
                 if picked.count == 1 {
@@ -121,16 +130,6 @@ struct TrackTable: View {
             Button("") { triggerShortcutDelete(rows: rows) }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .opacity(0)
-            Button("") {
-                let picked = rows.filter { selection.contains($0.id) }
-                if !picked.isEmpty {
-                    picked.forEach(model.toggleFavorite)
-                } else if let cur = player.current, let track = store.track(cur.relPath) ?? player.current {
-                    model.toggleFavorite(track)
-                }
-            }
-            .keyboardShortcut("f", modifiers: .command)
-            .opacity(0)
         }
     }
 

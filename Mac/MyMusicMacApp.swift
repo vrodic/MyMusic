@@ -36,11 +36,13 @@ struct MyMusicMacApp: App {
                     .disabled(!model.isRootAvailable || model.player.current == nil)
                 Divider()
                 Button("Toggle Favorite") {
-                    if let cur = model.player.current, let track = model.store.track(cur.relPath) ?? model.player.current {
-                        model.toggleFavorite(track)
-                    }
+                    model.toggleFavoriteCurrentOrSelected()
                 }.keyboardShortcut("f", modifiers: .command)
-                    .disabled(!model.isRootAvailable || model.player.current == nil)
+                    .disabled(!model.isRootAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
+                Button("Show in Folder") {
+                    model.showInFolderCurrentOrSelected()
+                }.keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!model.isRootAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
                 Divider()
                 Button("Rescan Library") { Task { await model.rescan() } }.keyboardShortcut("r", modifiers: .command)
                     .disabled(!model.isRootAvailable || model.isScanning)

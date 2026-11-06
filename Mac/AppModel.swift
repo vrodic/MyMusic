@@ -151,6 +151,7 @@ struct RevealRequest: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var revealRequest: RevealRequest?
+    @Published var selectedTrackPaths: Set<String> = []
     func reveal(_ t: Track, in place: RevealRequest.Place) { revealRequest = RevealRequest(relPath: t.relPath, place: place) }
     @Published private(set) var musicRoot: URL?
     @Published private(set) var isRootAvailable = false
@@ -718,6 +719,29 @@ final class AppModel: ObservableObject {
         defer { web?.syncSoon() }
         let u = store.toggleFavorite(t)
         player.refresh(u)
+    }
+
+    func toggleFavoriteCurrentOrSelected() {
+        if !selectedTrackPaths.isEmpty {
+            let tracks = selectedTrackPaths.compactMap { store.track($0) }
+            if !tracks.isEmpty {
+                tracks.forEach { toggleFavorite($0) }
+                return
+            }
+        }
+        if let cur = player.current, let track = store.track(cur.relPath) ?? player.current {
+            toggleFavorite(track)
+        }
+    }
+
+    func showInFolderCurrentOrSelected() {
+        if let first = selectedTrackPaths.first, let track = store.track(first) {
+            reveal(track, in: .folder)
+            return
+        }
+        if let cur = player.current, let track = store.track(cur.relPath) ?? player.current {
+            reveal(track, in: .folder)
+        }
     }
 
     /// Permanently deletes songs from disk, removes them from library, queue and playlists,
