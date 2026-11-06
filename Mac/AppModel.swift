@@ -151,7 +151,13 @@ struct RevealRequest: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var revealRequest: RevealRequest?
-    @Published var selectedTrackPaths: Set<String> = []
+    var selectedTrackPaths: Set<String> = [] {
+        didSet {
+            if oldValue.isEmpty != selectedTrackPaths.isEmpty {
+                objectWillChange.send()
+            }
+        }
+    }
     func reveal(_ t: Track, in place: RevealRequest.Place) { revealRequest = RevealRequest(relPath: t.relPath, place: place) }
     @Published private(set) var musicRoot: URL?
     @Published private(set) var isRootAvailable = false

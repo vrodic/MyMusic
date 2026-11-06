@@ -38,24 +38,26 @@ struct TrackTable: View {
         self.revealPlace = revealPlace
         self.playlistID = playlistID
         self.persistSortKey = persistSortKey
+        let initialSort: [KeyPathComparator<Track>]
         if let key = persistSortKey,
            let saved = UserDefaults.standard.string(forKey: key),
            !saved.isEmpty {
-            _sortOrder = State(initialValue: [KeyPathComparator<Track>].from(serialized: saved))
+            initialSort = [KeyPathComparator<Track>].from(serialized: saved)
         } else {
-            _sortOrder = State(initialValue: [])
+            initialSort = []
         }
+        _sortOrder = State(initialValue: initialSort)
     }
 
-    /// Always show the store's current copy, so hearts and play counts update in folder/album lists too.
-    private var live: [Track] { tracks.map { store.track($0.relPath) ?? $0 } }
-    private var sorted: [Track] { sortOrder.isEmpty ? live : live.sorted(using: sortOrder) }
+    private var sorted: [Track] {
+        sortOrder.isEmpty ? tracks : tracks.sorted(using: sortOrder)
+    }
 
     var body: some View {
         let rows = sorted
         Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             TableColumn("♥", value: \.favoriteSort) { t in
-                Button { model.toggleFavorite(t) } label: {
+                Button { toggleFavoriteTrack(t) } label: {
                     Image(systemName: t.favorite ? "heart.fill" : "heart").foregroundStyle(t.favorite ? .pink : .secondary)
                 }.buttonStyle(.plain)
             }.width(22).customizationID("favorite")
@@ -68,18 +70,18 @@ struct TrackTable: View {
             TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45).customizationID("plays")
             TableColumn("Format", value: \.fileExtension).width(50).customizationID("format")
             TableColumn("Favorited", value: \.favoritedSort) { t in
-                if t.favorite, let at = t.favoriteAt {
-                    Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                if t.favorite, let at = t.favoriteAt, at > 0 {
+                    Text(FastDateFormatter.string(from: at)).monospacedDigit()
                 }
             }.width(90).customizationID("favorited")
             TableColumn("Added", value: \.addedAt) { t in
                 if t.addedAt > 0 {
-                    Text(Date(timeIntervalSince1970: t.addedAt), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                    Text(FastDateFormatter.string(from: t.addedAt)).monospacedDigit()
                 }
             }.width(90).customizationID("added")
             TableColumn("Last played", value: \.lastPlayedSort) { t in
                 if let at = t.lastPlayed, at > 0 {
-                    Text(Date(timeIntervalSince1970: at), format: .dateTime.year().month(.abbreviated).day()).monospacedDigit()
+                    Text(FastDateFormatter.string(from: at)).monospacedDigit()
                 }
             }.width(90).customizationID("lastPlayed")
         }
@@ -96,14 +98,18 @@ struct TrackTable: View {
                 }
             }
             handleReveal()
-            if !selection.isEmpty { model.selectedTrackPaths = selection }
+            if !selection.isEmpty && model.selectedTrackPaths != selection {
+                model.selectedTrackPaths = selection
+            }
         }
         .onChange(of: selection) { _, new in
-            model.selectedTrackPaths = new
+            if model.selectedTrackPaths != new {
+                model.selectedTrackPaths = new
+            }
         }
         .onChange(of: model.revealRequest) { handleReveal() }
         .contextMenu(forSelectionType: Track.ID.self) { ids in
-            let picked = rows.filter { ids.contains($0.id) }
+            let picked = ids.count == 1 ? ids.compactMap { store.track($0) } : rows.filter { ids.contains($0.id) }
             Button("Play") { play(picked.first, in: rows) }
             Button("Play Next") { picked.reversed().forEach(player.playNext) }
             Button("Add to Queue") { picked.forEach(player.addToQueue) }
@@ -186,6 +192,10 @@ struct TrackTable: View {
 
     private var allFavorite: Bool { !tracks.isEmpty && tracks.allSatisfy { model.store.track($0.relPath)?.favorite ?? $0.favorite } }
 
+    private func toggleFavoriteTrack(_ t: Track) {
+        model.toggleFavorite(t)
+    }
+
     private func toggleAllFavorites() {
         let fav = !allFavorite
         model.store.setFavorite(tracks, fav)
@@ -257,6 +267,25 @@ extension Array where Element == KeyPathComparator<Track> {
             guard let field = TrackSortField.from(keyPath: comp.keyPath) else { return nil }
             return "\(field.rawValue):\(comp.order == .reverse ? "reverse" : "forward")"
         }.joined(separator: ",")
+    }
+}
+
+enum FastDateFormatter {
+    @MainActor private static let formatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .none
+        return df
+    }()
+    @MainActor private static var cache: [Int: String] = [:]
+
+    @MainActor static func string(from timestamp: Double) -> String {
+        guard timestamp > 0 else { return "" }
+        let dayKey = Int(timestamp / 86400)
+        if let cached = cache[dayKey] { return cached }
+        let str = formatter.string(from: Date(timeIntervalSince1970: timestamp))
+        cache[dayKey] = str
+        return str
     }
 }
 
