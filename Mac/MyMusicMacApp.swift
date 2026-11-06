@@ -217,7 +217,7 @@ struct ContentView: View {
         // The toolbar search filters whatever section is open (it used to replace it).
         switch selection ?? .songs {
         case .songs: TrackTable(tracks: store.search(search), title: search.isEmpty ? "Songs" : "Songs matching “\(search)”", resetKey: search,
-                               scrollKey: "songs", search: search, revealPlace: search.isEmpty ? .songs : nil)
+                               scrollKey: "songs", search: search, revealPlace: search.isEmpty ? .songs : nil, persistSortKey: "mac.songsSortOrder")
         case .folders: FolderBrowser(search: $search)
         case .artists: ArtistBrowser(search: search)
         case .albums: AlbumBrowser(search: search)

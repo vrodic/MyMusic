@@ -18,12 +18,34 @@ struct TrackTable: View {
     var revealPlace: RevealRequest.Place? = nil
     /// Set when showing a playlist: adds Remove / Move to Top.
     var playlistID: String? = nil
+    var persistSortKey: String? = nil
     @State private var sortOrder: [KeyPathComparator<Track>] = []
     @State private var selection = Set<Track.ID>()
     @State private var confirmFavorite = false
     @State private var confirmDelete = false
     @State private var tracksPendingDelete: [Track] = []
     @AppStorage("mac.trackTableColumns") private var columnCustomization = TableColumnCustomization<Track>()
+
+    init(tracks: [Track], title: String = "", defaultSort: Bool = true, resetKey: String = "",
+         scrollKey: String? = nil, search: String = "", revealPlace: RevealRequest.Place? = nil,
+         playlistID: String? = nil, persistSortKey: String? = nil) {
+        self.tracks = tracks
+        self.title = title
+        self.defaultSort = defaultSort
+        self.resetKey = resetKey
+        self.scrollKey = scrollKey
+        self.search = search
+        self.revealPlace = revealPlace
+        self.playlistID = playlistID
+        self.persistSortKey = persistSortKey
+        if let key = persistSortKey,
+           let saved = UserDefaults.standard.string(forKey: key),
+           !saved.isEmpty {
+            _sortOrder = State(initialValue: [KeyPathComparator<Track>].from(serialized: saved))
+        } else {
+            _sortOrder = State(initialValue: [])
+        }
+    }
 
     /// Always show the store's current copy, so hearts and play counts update in folder/album lists too.
     private var live: [Track] { tracks.map { store.track($0.relPath) ?? $0 } }
@@ -67,6 +89,12 @@ struct TrackTable: View {
         .rememberScroll(scrollMemoryKey, resetOn: search)
         .id(TableIdentity.of(resetKey, title, "\(sortOrder)"))
         .onAppear {
+            if let key = persistSortKey, let saved = UserDefaults.standard.string(forKey: key) {
+                let loaded = [KeyPathComparator<Track>].from(serialized: saved)
+                if sortOrder != loaded {
+                    sortOrder = loaded
+                }
+            }
             handleReveal()
             if !selection.isEmpty { model.selectedTrackPaths = selection }
         }
@@ -108,7 +136,12 @@ struct TrackTable: View {
         .navigationSubtitle("\(tracks.count) songs")
         .onChange(of: sortOrder) { old, new in
             // The ♥ header is a "favorite everything shown" button, not a sort.
-            guard new.first?.keyPath == \Track.favoriteSort else { return }
+            guard new.first?.keyPath == \Track.favoriteSort else {
+                if let key = persistSortKey {
+                    UserDefaults.standard.set(new.serialize(), forKey: key)
+                }
+                return
+            }
             sortOrder = old.filter { $0.keyPath != \Track.favoriteSort }
             if tracks.count > 25 { confirmFavorite = true } else { toggleAllFavorites() }
         }
@@ -172,6 +205,58 @@ struct TrackTable: View {
     private func play(_ t: Track?, in rows: [Track]) {
         guard let t, let i = rows.firstIndex(of: t) else { return }
         player.play(rows, startAt: i)
+    }
+}
+
+private enum TrackSortField: String {
+    case favorite, title, artist, album, time, plays, format, favorited, added, lastPlayed
+
+    static func from(keyPath: AnyKeyPath) -> TrackSortField? {
+        if keyPath == \Track.favoriteSort { return .favorite }
+        if keyPath == \Track.title { return .title }
+        if keyPath == \Track.displayArtist { return .artist }
+        if keyPath == \Track.displayAlbum { return .album }
+        if keyPath == \Track.durationSort { return .time }
+        if keyPath == \Track.playCount { return .plays }
+        if keyPath == \Track.fileExtension { return .format }
+        if keyPath == \Track.favoritedSort { return .favorited }
+        if keyPath == \Track.addedAt { return .added }
+        if keyPath == \Track.lastPlayedSort { return .lastPlayed }
+        return nil
+    }
+
+    func comparator(order: SortOrder) -> KeyPathComparator<Track> {
+        switch self {
+        case .favorite: return KeyPathComparator(\Track.favoriteSort, order: order)
+        case .title: return KeyPathComparator(\Track.title, order: order)
+        case .artist: return KeyPathComparator(\Track.displayArtist, order: order)
+        case .album: return KeyPathComparator(\Track.displayAlbum, order: order)
+        case .time: return KeyPathComparator(\Track.durationSort, order: order)
+        case .plays: return KeyPathComparator(\Track.playCount, order: order)
+        case .format: return KeyPathComparator(\Track.fileExtension, order: order)
+        case .favorited: return KeyPathComparator(\Track.favoritedSort, order: order)
+        case .added: return KeyPathComparator(\Track.addedAt, order: order)
+        case .lastPlayed: return KeyPathComparator(\Track.lastPlayedSort, order: order)
+        }
+    }
+}
+
+extension Array where Element == KeyPathComparator<Track> {
+    static func from(serialized: String) -> [KeyPathComparator<Track>] {
+        serialized.split(separator: ",").compactMap { part in
+            let pieces = part.split(separator: ":")
+            guard pieces.count == 2,
+                  let field = TrackSortField(rawValue: String(pieces[0])) else { return nil }
+            let order: SortOrder = pieces[1] == "reverse" ? .reverse : .forward
+            return field.comparator(order: order)
+        }
+    }
+
+    func serialize() -> String {
+        compactMap { comp in
+            guard let field = TrackSortField.from(keyPath: comp.keyPath) else { return nil }
+            return "\(field.rawValue):\(comp.order == .reverse ? "reverse" : "forward")"
+        }.joined(separator: ",")
     }
 }
 
