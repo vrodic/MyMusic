@@ -334,14 +334,29 @@ final class PlayerEngine: ObservableObject {
     }
 
     func seek(to seconds: Double) {
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
-        clock.time = seconds; updateNowPlaying()
+        clock.time = seconds
+        seekID += 1
+        let currentSeek = seekID
+        isSeeking = true
+        let cmTime = CMTime(seconds: seconds, preferredTimescale: 600)
+        player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self, currentSeek == self.seekID else { return }
+                self.isSeeking = false
+                if finished {
+                    self.clock.time = seconds
+                }
+            }
+        }
+        updateNowPlaying()
     }
 
     func stop() {
         loadTask?.cancel(); prefetchTask?.cancel()
         currentResourceLoader?.cancelAll()
         previousTrack = nil; memoryCache.removeAll(); currentResourceLoader = nil
+        isSeeking = false
+        seekID += 1
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
         isPlaying = false; clock.time = 0; duration = 0; artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -366,6 +381,8 @@ final class PlayerEngine: ObservableObject {
     private var pendingSeek: Double?
     private var statusObservation: NSKeyValueObservation?
     private var lastSavedTime = -100.0
+    private var isSeeking = false
+    private var seekID = 0
 
     /// Saved on every play / pause / song change, every few seconds while playing, and when the
     /// app quits or goes to the background.
@@ -491,6 +508,8 @@ final class PlayerEngine: ObservableObject {
     private func load(autoplay: Bool) {
         guard let t = current else { return }
         counted = false
+        isSeeking = false
+        seekID += 1
         clock.time = 0
         pendingSeek = nil; statusObservation = nil
         duration = t.duration ?? 0
@@ -572,7 +591,7 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func tick(_ t: Double) {
-        guard t.isFinite, pendingSeek == nil else { return }
+        guard t.isFinite, pendingSeek == nil, !isSeeking else { return }
         clock.time = t
         if isPlaying, abs(t - lastSavedTime) >= 5 { saveState() }
         // assign only when it changes: every @Published write redraws all observers
