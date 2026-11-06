@@ -86,6 +86,7 @@ struct ContentView: View {
     /// Sidebar selection: a SidebarItem's raw value, or "pl:<playlist id>".
     @State private var selectionKey: String?
     @State private var search = ""
+    @State private var isSearchFocused = false
     @AppStorage("mac.folderPath") private var folderPath = ""   // FolderBrowser's open folder
 
     private var selection: SidebarItem? {
@@ -148,7 +149,19 @@ struct ContentView: View {
                 }
             }
         }
-        .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
+        .searchable(text: $search, isPresented: $isSearchFocused, placement: .toolbar, prompt: searchPrompt)
+        .onKeyPress(phases: .down) { press in
+            guard press.modifiers.isEmpty || press.modifiers == .shift else { return .ignored }
+            guard let ch = press.characters.first, press.characters.count == 1, ch.isLetter || ch.isNumber else {
+                return .ignored
+            }
+            if !isSearchFieldFocused {
+                search = String(ch)
+                focusSearchField()
+                return .handled
+            }
+            return .ignored
+        }
         .onAppear { if selectionKey == nil { selectionKey = savedSection.hasPrefix("pl:") || SidebarItem(rawValue: savedSection) != nil ? savedSection : SidebarItem.songs.rawValue } }
         .onChange(of: selectionKey) { _, new in if let new { savedSection = new } }
         .onChange(of: model.revealRequest) { _, r in
@@ -238,6 +251,37 @@ struct ContentView: View {
         case .stats: "Search library"
         default: "Search \((selection ?? .songs).rawValue.lowercased())"
         }
+    }
+
+    private var isSearchFieldFocused: Bool {
+        guard let fr = NSApp.keyWindow?.firstResponder else { return false }
+        return fr is NSTextView
+    }
+
+    private func focusSearchField() {
+        isSearchFocused = true
+        DispatchQueue.main.async {
+            guard let window = NSApp.keyWindow else { return }
+            var searchField = findSearchField(in: window.contentView)
+            if searchField == nil, let titlebarView = window.standardWindowButton(.closeButton)?.superview?.superview {
+                searchField = findSearchField(in: titlebarView)
+            }
+            if let sf = searchField {
+                window.makeFirstResponder(sf)
+                if let editor = sf.currentEditor() as? NSTextView {
+                    editor.setSelectedRange(NSRange(location: editor.string.count, length: 0))
+                }
+            }
+        }
+    }
+
+    private func findSearchField(in view: NSView?) -> NSSearchField? {
+        guard let view else { return nil }
+        if let sf = view as? NSSearchField { return sf }
+        for sub in view.subviews {
+            if let found = findSearchField(in: sub) { return found }
+        }
+        return nil
     }
 }
 
