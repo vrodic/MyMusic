@@ -21,6 +21,8 @@ struct TrackTable: View {
     @State private var sortOrder: [KeyPathComparator<Track>] = []
     @State private var selection = Set<Track.ID>()
     @State private var confirmFavorite = false
+    @State private var confirmDelete = false
+    @State private var tracksPendingDelete: [Track] = []
 
     /// Always show the store's current copy, so hearts and play counts update in folder/album lists too.
     private var live: [Track] { tracks.map { store.track($0.relPath) ?? $0 } }
@@ -70,6 +72,15 @@ struct TrackTable: View {
                 if let first = picked.first { Button("Move to Top") { model.movePlaylistItem(pid, first, toTop: true) } }
             }
             if let first = picked.first { Button("Show in Finder") { model.revealInFinder(first) } }
+            Divider()
+            Button(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song", role: .destructive) {
+                if picked.count == 1 {
+                    model.deleteSongs(picked)
+                } else {
+                    tracksPendingDelete = picked
+                    confirmDelete = true
+                }
+            }
         } primaryAction: { ids in
             play(rows.first { ids.contains($0.id) }, in: rows)
         }
@@ -85,6 +96,39 @@ struct TrackTable: View {
                             isPresented: $confirmFavorite, titleVisibility: .visible) {
             Button(allFavorite ? "Unfavorite All" : "Favorite All") { toggleAllFavorites() }
         }
+        .confirmationDialog(
+            tracksPendingDelete.count > 1
+                ? "Are you sure you want to permanently delete these \(tracksPendingDelete.count) songs from disk and library?"
+                : "Are you sure you want to permanently delete “\(tracksPendingDelete.first?.title ?? "this song")” from disk and library?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                let toDelete = tracksPendingDelete
+                tracksPendingDelete = []
+                model.deleteSongs(toDelete)
+            }
+            Button("Cancel", role: .cancel) {
+                tracksPendingDelete = []
+            }
+        } message: {
+            Text("This will permanently remove the audio file from disk.")
+        }
+        .background {
+            Button("") { triggerShortcutDelete(rows: rows) }
+                .keyboardShortcut(.delete, modifiers: [])
+                .opacity(0)
+            Button("") { triggerShortcutDelete(rows: rows) }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .opacity(0)
+        }
+    }
+
+    private func triggerShortcutDelete(rows: [Track]) {
+        let picked = rows.filter { selection.contains($0.id) }
+        guard !picked.isEmpty else { return }
+        tracksPendingDelete = picked
+        confirmDelete = true
     }
 
     private var allFavorite: Bool { !tracks.isEmpty && tracks.allSatisfy { model.store.track($0.relPath)?.favorite ?? $0.favorite } }

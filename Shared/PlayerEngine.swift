@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import SwiftUI
 import MediaPlayer
+import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 typealias PlatformImage = UIImage
@@ -9,6 +10,80 @@ typealias PlatformImage = UIImage
 import AppKit
 typealias PlatformImage = NSImage
 #endif
+
+/// Thread-safe in-memory cache for track file bytes.
+final class TrackMemoryCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cache: [String: Data] = [:]
+
+    func data(for relPath: String) -> Data? {
+        lock.withLock { cache[relPath] }
+    }
+
+    func set(_ data: Data, for relPath: String) {
+        lock.withLock { cache[relPath] = data }
+    }
+
+    func remove(for relPath: String) {
+        lock.withLock { cache.removeValue(forKey: relPath) }
+    }
+
+    func keepOnly(relPaths: Set<String>) {
+        lock.withLock {
+            let keysToRemove = cache.keys.filter { !relPaths.contains($0) }
+            for k in keysToRemove { cache.removeValue(forKey: k) }
+        }
+    }
+
+    func removeAll() {
+        lock.withLock { cache.removeAll() }
+    }
+}
+
+/// Serves in-memory audio data to AVPlayer without disk or network I/O.
+final class MemoryResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    private let data: Data
+    private let contentType: String?
+
+    init(data: Data, fileExtension: String) {
+        self.data = data
+        if let utType = UTType(filenameExtension: fileExtension) {
+            self.contentType = utType.identifier
+        } else {
+            self.contentType = nil
+        }
+        super.init()
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        if let contentRequest = loadingRequest.contentInformationRequest {
+            contentRequest.isByteRangeAccessSupported = true
+            contentRequest.contentLength = Int64(data.count)
+            if let contentType {
+                contentRequest.contentType = contentType
+            }
+        }
+
+        if let dataRequest = loadingRequest.dataRequest {
+            let offset = Int(dataRequest.requestedOffset)
+            let length = dataRequest.requestedLength
+            if offset < data.count {
+                let bytesToProvide = min(length, data.count - offset)
+                let subdata = data.subdata(in: offset..<(offset + bytesToProvide))
+                dataRequest.respond(with: subdata)
+                loadingRequest.finishLoading()
+            } else {
+                loadingRequest.finishLoading()
+            }
+        } else {
+            loadingRequest.finishLoading()
+        }
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+    }
+}
 
 enum RepeatMode: String, CaseIterable { case off, all, one }
 
@@ -50,6 +125,12 @@ final class PlayerEngine: ObservableObject {
     private let urlFor: (Track) -> URL
     var onPlayCounted: (Track) -> Void = { _ in }
     var onSkipped: (Track) -> Void = { _ in }
+
+    private let memoryCache = TrackMemoryCache()
+    private var previousTrack: Track?
+    private var currentResourceLoader: MemoryResourceLoader?
+    private var loadTask: Task<Void, Never>?
+    private var prefetchTask: Task<Void, Never>?
 
     init(urlFor: @escaping (Track) -> URL) {
         self.urlFor = urlFor
@@ -114,9 +195,29 @@ final class PlayerEngine: ObservableObject {
         queue = Array(queue[...index]) + rest
     }
 
+    func removeTracks(_ paths: Set<String>) {
+        for p in paths { memoryCache.remove(for: p) }
+        if let cur = current, paths.contains(cur.relPath) {
+            stop()
+            return
+        }
+        queue.removeAll { paths.contains($0.relPath) }
+        originalQueue.removeAll { paths.contains($0.relPath) }
+        if queue.isEmpty {
+            stop()
+        } else {
+            if index >= queue.count { index = max(0, queue.count - 1) }
+            saveState()
+        }
+    }
+
     func jump(to i: Int) {
         guard queue.indices.contains(i) else { return }
-        maybeSkip(); index = i; load(autoplay: true)
+        maybeSkip()
+        let old = current
+        index = i
+        if let old, old.relPath != current?.relPath { previousTrack = old }
+        load(autoplay: true)
     }
 
     func togglePlay() { isPlaying ? pause() : resume() }
@@ -131,15 +232,20 @@ final class PlayerEngine: ObservableObject {
     func next() {
         guard !queue.isEmpty else { return }
         maybeSkip()
+        let old = current
         if index + 1 < queue.count { index += 1 }
         else if repeatMode == .all { index = 0 }
         else { pause(); seek(to: 0); return }
+        if let old, old.relPath != current?.relPath { previousTrack = old }
         load(autoplay: true)
     }
 
     func previous() {
         if currentTime > 3 || index == 0 { seek(to: 0); return }
-        index -= 1; load(autoplay: true)
+        let old = current
+        index -= 1
+        if let old, old.relPath != current?.relPath { previousTrack = old }
+        load(autoplay: true)
     }
 
     func seek(to seconds: Double) {
@@ -148,6 +254,8 @@ final class PlayerEngine: ObservableObject {
     }
 
     func stop() {
+        loadTask?.cancel(); prefetchTask?.cancel()
+        previousTrack = nil; memoryCache.removeAll(); currentResourceLoader = nil
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
         isPlaying = false; clock.time = 0; duration = 0; artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -236,9 +344,9 @@ final class PlayerEngine: ObservableObject {
     /// Seek once the song is ready to play (a seek on a file still opening can be ignored).
     private func seekWhenReady(_ t: Double) {
         clock.time = t
-        guard let item = player.currentItem else { return }
-        if item.status == .readyToPlay { seek(to: t); return }
         pendingSeek = t
+        guard let item = player.currentItem else { return }
+        if item.status == .readyToPlay { pendingSeek = nil; seek(to: t); return }
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .readyToPlay else { return }
             Task { @MainActor in
@@ -250,18 +358,85 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
+    private func setupPlayerItem(with data: Data, for t: Track, autoplay: Bool) {
+        let ext = (t.relPath as NSString).pathExtension.lowercased()
+        let safeExt = ext.isEmpty ? "m4a" : ext
+        guard let dummyURL = URL(string: "mymusic-mem://audio/\(UUID().uuidString).\(safeExt)") else {
+            setupPlayerItemWithURL(url: urlFor(t), for: t, autoplay: autoplay)
+            return
+        }
+        let asset = AVURLAsset(url: dummyURL)
+        let loader = MemoryResourceLoader(data: data, fileExtension: safeExt)
+        currentResourceLoader = loader
+        asset.resourceLoader.setDelegate(loader, queue: DispatchQueue.global(qos: .userInitiated))
+        let item = AVPlayerItem(asset: asset)
+        player.replaceCurrentItem(with: item)
+        if autoplay { activateSession(); player.play(); isPlaying = true }
+        if let s = pendingSeek { seekWhenReady(s) }
+        updateNowPlaying()
+    }
+
+    private func setupPlayerItemWithURL(url: URL, for t: Track, autoplay: Bool) {
+        currentResourceLoader = nil
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        if autoplay { activateSession(); player.play(); isPlaying = true }
+        if let s = pendingSeek { seekWhenReady(s) }
+        updateNowPlaying()
+    }
+
+    private func updateCacheEvictionAndPrefetch() {
+        let cur = current
+        let next = upNext.first
+        let prev = previousTrack
+        let pathsToKeep = Set([cur?.relPath, next?.relPath, prev?.relPath].compactMap { $0 })
+        memoryCache.keepOnly(relPaths: pathsToKeep)
+
+        prefetchTask?.cancel()
+        guard let nextTrack = next else { return }
+        if memoryCache.data(for: nextTrack.relPath) != nil { return }
+        let nextURL = urlFor(nextTrack)
+        prefetchTask = Task { [weak self] in
+            let data = await Task.detached { try? Data(contentsOf: nextURL) }.value
+            guard !Task.isCancelled, let data else { return }
+            await MainActor.run { [weak self] in
+                self?.memoryCache.set(data, for: nextTrack.relPath)
+            }
+        }
+    }
+
     private func load(autoplay: Bool) {
         guard let t = current else { return }
         counted = false
         clock.time = 0
         pendingSeek = nil; statusObservation = nil
         duration = t.duration ?? 0
-        player.replaceCurrentItem(with: AVPlayerItem(url: urlFor(t)))
         artwork = nil
-        if autoplay { activateSession(); player.play(); isPlaying = true }
+        loadTask?.cancel()
+
+        let url = urlFor(t)
+        if let cachedData = memoryCache.data(for: t.relPath) {
+            setupPlayerItem(with: cachedData, for: t, autoplay: autoplay)
+            updateCacheEvictionAndPrefetch()
+        } else {
+            loadTask = Task { [weak self] in
+                guard let self else { return }
+                let data = await Task.detached { try? Data(contentsOf: url) }.value
+                guard !Task.isCancelled else { return }
+                guard let cur = self.current, cur.relPath == t.relPath else { return }
+                if let data {
+                    self.memoryCache.set(data, for: t.relPath)
+                    self.setupPlayerItem(with: data, for: t, autoplay: autoplay)
+                } else {
+                    self.setupPlayerItemWithURL(url: url, for: t, autoplay: autoplay)
+                }
+                self.updateCacheEvictionAndPrefetch()
+            }
+        }
+
         updateNowPlaying()
         saveState()
-        let url = urlFor(t)
+
         Task { [weak self] in
             let data = await AudioScanner.artwork(url: url)
             guard let self, self.current?.relPath == t.relPath else { return }

@@ -17,6 +17,11 @@ struct MyMusicMacApp: App {
                 .frame(minWidth: 960, minHeight: 600)
         }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About MyMusic") {
+                    showAboutBox()
+                }
+            }
             CommandMenu("Controls") {
                 Button("Play/Pause") { model.player.togglePlay() }.keyboardShortcut(.space, modifiers: [])
                     .disabled(!model.isRootAvailable)
@@ -246,6 +251,38 @@ struct UserMenu: View {
         }
         .help("Whose favorites, play counts and playlists")
     }
+}
+
+private func showAboutBox() {
+    var buildInfo = ""
+    if let execURL = Bundle.main.executableURL,
+       let attrs = try? FileManager.default.attributesOfItem(atPath: execURL.path),
+       let date = attrs[.modificationDate] as? Date {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        buildInfo = "Build date: " + formatter.string(from: date)
+    } else if let bundleURL = Bundle.main.bundleURL as URL?,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: bundleURL.path),
+              let date = attrs[.creationDate] as? Date ?? attrs[.modificationDate] as? Date {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        buildInfo = "Build date: " + formatter.string(from: date)
+    }
+
+    var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+    if !buildInfo.isEmpty {
+        let credits = NSAttributedString(
+            string: buildInfo,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+        )
+        options[.credits] = credits
+    }
+    NSApplication.shared.orderFrontStandardAboutPanel(options: options)
 }
 
 /// Small modal text prompts (names for users and playlists).

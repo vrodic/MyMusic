@@ -13,7 +13,7 @@ enum YTPriority: Int, CaseIterable, Identifiable, Codable {
     }
 }
 
-enum YTStatus: String, Codable, CaseIterable { case pending, downloading, done, failed }
+enum YTStatus: String, Codable, CaseIterable { case pending, downloading, done, failed, deleted }
 
 struct YTItem: Identifiable, Hashable {
     var videoID: String
@@ -162,9 +162,14 @@ extension LibraryDB {
                 if let st = doc["status"] as? String {
                     let cur = local[id]
                     // never interrupt our own running download with someone else's older state
-                    if cur?.status == .downloading && !done { continue }
-                    try db.execute("UPDATE yt_items SET status = ?, rel_path = COALESCE(?, rel_path), error = ?, attempts = ? WHERE video_id = ?",
-                                   [done ? YTStatus.done.rawValue : st, doc["relPath"] as? String, doc["error"] as? String, doc["attempts"] as? Int ?? 0, id])
+                    if cur?.status == .downloading && !done && st != YTStatus.deleted.rawValue { continue }
+                    if st == YTStatus.deleted.rawValue {
+                        try db.execute("UPDATE yt_items SET status = ?, rel_path = NULL, priority = ?, error = ?, attempts = ? WHERE video_id = ?",
+                                       [st, YTPriority.skip.rawValue, doc["error"] as? String, doc["attempts"] as? Int ?? 0, id])
+                    } else {
+                        try db.execute("UPDATE yt_items SET status = ?, rel_path = COALESCE(?, rel_path), error = ?, attempts = ? WHERE video_id = ?",
+                                       [done ? YTStatus.done.rawValue : st, doc["relPath"] as? String, doc["error"] as? String, doc["attempts"] as? Int ?? 0, id])
+                    }
                     if done, cur?.status != .done, let rel = doc["relPath"] as? String { downloadedElsewhere.append(rel) }
                 }
             }
@@ -260,6 +265,24 @@ extension LibraryDB {
         try? db.transaction { for id in ids { try db.execute("UPDATE yt_items SET match_score = 1.0, match_override = 0, library_match = '' WHERE video_id = ?", [id]) } }
     }
 
+    /// Mark YouTube items as deleted and do not download when a song file is deleted.
+    func markYTDeleted(_ relPaths: [String]) {
+        let set = Set(relPaths)
+        let affected = ytItems().filter { item in
+            if let r = item.relPath, set.contains(r) { return true }
+            if let m = item.libraryMatch, set.contains(m) { return true }
+            return false
+        }
+        guard !affected.isEmpty else { return }
+        try? db.transaction {
+            for it in affected {
+                try db.execute("UPDATE yt_items SET status = 'deleted', priority = ?, rel_path = NULL WHERE video_id = ?",
+                               [YTPriority.skip.rawValue, it.videoID])
+            }
+        }
+        publishYT(affected.map(\.videoID), user: true, download: true)
+    }
+
     /// Songs another Mac is downloading right now.
     func ytClaimedElsewhere() -> Set<String> {
         let me = sync.replicaID
@@ -268,7 +291,7 @@ extension LibraryDB {
 
     func nextYTDownload(maxAttempts: Int = 3) -> YTItem? {
         let elsewhere = ytClaimedElsewhere()
-        return ytItems().filter { $0.priority != .skip && !$0.likelyInLibrary && !elsewhere.contains($0.videoID)
+        return ytItems().filter { $0.priority != .skip && $0.status != .deleted && !$0.likelyInLibrary && !elsewhere.contains($0.videoID)
             && ($0.status == .pending || ($0.status == .failed && $0.attempts < maxAttempts)) }
             .sorted { ($0.priority.rawValue, -$0.playlistIndex, -$0.attempts) > ($1.priority.rawValue, -$1.playlistIndex, -$1.attempts) }
             .first

@@ -719,4 +719,39 @@ final class AppModel: ObservableObject {
         let u = store.toggleFavorite(t)
         player.refresh(u)
     }
+
+    /// Permanently deletes songs from disk, removes them from library, queue and playlists,
+    /// and marks them as deleted in YouTube Liked (Do not download).
+    func deleteSongs(_ tracks: [Track]) {
+        guard !tracks.isEmpty else { return }
+        let paths = tracks.map(\.relPath)
+        let pathSet = Set(paths)
+
+        player.removeTracks(pathSet)
+
+        for p in playlists {
+            if p.items.contains(where: { pathSet.contains($0) || pathSet.contains(SyncStore.key($0)) }) {
+                removeFromPlaylist(p.id, tracks)
+            }
+        }
+
+        db.markYTDeleted(paths)
+        yt?.reload()
+
+        Task {
+            if let root = self.musicRoot {
+                await offMain {
+                    let fm = FileManager.default
+                    for rel in paths {
+                        let url = root.appendingFile(rel)
+                        try? fm.removeItem(at: url)
+                    }
+                }
+            }
+            try? self.db.delete(paths)
+            await self.store.reloadNow()
+            self.peers?.kick(after: 2)
+            self.web?.syncSoon()
+        }
+    }
 }
