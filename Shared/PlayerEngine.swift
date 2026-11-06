@@ -333,6 +333,15 @@ final class PlayerEngine: ObservableObject {
         load(autoplay: true)
     }
 
+    func skipForward(_ seconds: Double = 15) {
+        let maxTime = duration > 0 ? duration : (currentTime + seconds)
+        seek(to: min(maxTime, currentTime + seconds))
+    }
+
+    func skipBackward(_ seconds: Double = 15) {
+        seek(to: max(0, currentTime - seconds))
+    }
+
     func seek(to seconds: Double) {
         clock.time = seconds
         seekID += 1

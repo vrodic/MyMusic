@@ -22,6 +22,9 @@ struct MyMusicMacApp: App {
                     showAboutBox()
                 }
             }
+            CommandGroup(replacing: .find) {
+                // Override system Find so Cmd+F toggles favorite as requested
+            }
             CommandMenu("Controls") {
                 Button("Play/Pause") { model.player.togglePlay() }.keyboardShortcut(.space, modifiers: [])
                     .disabled(!model.isRootAvailable)
@@ -29,6 +32,18 @@ struct MyMusicMacApp: App {
                     .disabled(!model.isRootAvailable)
                 Button("Previous") { model.player.previous() }.keyboardShortcut(.leftArrow, modifiers: .command)
                     .disabled(!model.isRootAvailable)
+                Divider()
+                Button("Skip Forward 15 Seconds") { model.player.skipForward(15) }.keyboardShortcut(.rightArrow, modifiers: [])
+                    .disabled(!model.isRootAvailable || model.player.current == nil)
+                Button("Skip Backward 15 Seconds") { model.player.skipBackward(15) }.keyboardShortcut(.leftArrow, modifiers: [])
+                    .disabled(!model.isRootAvailable || model.player.current == nil)
+                Divider()
+                Button("Toggle Favorite") {
+                    if let cur = model.player.current, let track = model.store.track(cur.relPath) ?? model.player.current {
+                        model.toggleFavorite(track)
+                    }
+                }.keyboardShortcut("f", modifiers: .command)
+                    .disabled(!model.isRootAvailable || model.player.current == nil)
                 Divider()
                 Button("Rescan Library") { Task { await model.rescan() } }.keyboardShortcut("r", modifiers: .command)
                     .disabled(!model.isRootAvailable || model.isScanning)

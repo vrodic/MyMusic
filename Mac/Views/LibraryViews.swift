@@ -121,6 +121,16 @@ struct TrackTable: View {
             Button("") { triggerShortcutDelete(rows: rows) }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .opacity(0)
+            Button("") {
+                let picked = rows.filter { selection.contains($0.id) }
+                if !picked.isEmpty {
+                    picked.forEach(model.toggleFavorite)
+                } else if let cur = player.current, let track = store.track(cur.relPath) ?? player.current {
+                    model.toggleFavorite(track)
+                }
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0)
         }
     }
 
