@@ -22,9 +22,6 @@ struct MyMusicMacApp: App {
                     showAboutBox()
                 }
             }
-            CommandGroup(replacing: .find) {
-                // Override system Find so Cmd+F toggles favorite as requested
-            }
             CommandMenu("Controls") {
                 Button("Play/Pause") { model.player.togglePlay() }.keyboardShortcut(.space, modifiers: [])
                     .disabled(!model.isRootAvailable)
