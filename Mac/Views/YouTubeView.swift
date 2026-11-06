@@ -22,7 +22,7 @@ struct YouTubeView: View {
         case .inLibrary: f = yt.items.filter { $0.likelyInLibrary || $0.possibleMatch }
         case .done: f = yt.items.filter { $0.status == .done }
         case .failed: f = yt.items.filter { $0.status == .failed }
-        case .skipped: f = yt.items.filter { $0.priority == .skip && $0.status != .done }
+        case .skipped: f = yt.items.filter { ($0.priority == .skip || $0.status == .deleted) && $0.status != .done }
         }
         let q = search.trimmingCharacters(in: .whitespaces)
         let query = SearchQuery(q)
@@ -114,11 +114,11 @@ struct YouTubeView: View {
         let c = yt.counts
         return HStack(spacing: 12) {
             Button { Task { await yt.refreshLiked() } } label: { Label("Refresh Liked", systemImage: "arrow.clockwise") }
-                .disabled(yt.isIndexing)
+                .disabled(yt.isIndexing || yt.isMatching)
             Button { yt.togglePause() } label: {
                 Label(yt.paused ? "Resume Downloads" : "Pause Downloads", systemImage: yt.paused ? "play.fill" : "pause.fill")
             }
-            if yt.isIndexing { ProgressView().controlSize(.small) }
+            if yt.isIndexing || yt.isMatching { ProgressView().controlSize(.small) }
             if yt.isCoolingDown {
                 Button("Resume Now") { yt.endCooldown() }.help("Ignore YouTube's rate limit and continue the queue")
             }
@@ -192,7 +192,7 @@ struct YouTubeView: View {
     /// The track a double-click plays: the downloaded file, else the library copy it matched.
     private func playableTrack(_ item: YTItem) -> Track? {
         if item.status == .done, let rel = item.relPath, let t = model.store.track(rel) { return t }
-        guard !item.matchOverride, item.likelyInLibrary || item.possibleMatch,
+        guard item.status != .deleted, !item.matchOverride, item.likelyInLibrary || item.possibleMatch,
               let m = item.libraryMatch, !m.isEmpty else { return nil }
         return model.store.track(m)
     }
@@ -226,6 +226,7 @@ struct YouTubeView: View {
     @ViewBuilder private func statusView(_ i: YTItem) -> some View {
         switch i.status {
         case .done: Label("Downloaded", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .deleted: Label("Deleted", systemImage: "trash").foregroundStyle(.secondary)
         case .downloading:
             if yt.currentID == i.id { ProgressView(value: yt.currentProgress).help("Downloading") } else { Text("Downloading") }
         case .failed: Label("Failed (\(i.attempts))", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).help(i.error ?? "")
