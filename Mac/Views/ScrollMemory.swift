@@ -26,6 +26,9 @@ enum ScrollMemory {
         if let p = probes.object(forKey: key as NSString), p.isAttached { p.reveal(row) }
     }
 
+    /// For keyboard scrolling the tracker can't see: the key went to a different view than the list it moves.
+    static func noteUserScroll(_ sv: NSScrollView) { UserScrollTracker.note(sv) }
+
     /// Forget the saved offset if the search changed since it was saved.
     fileprivate static func check(_ key: String, _ token: String) {
         if tokens[key] != token { offsets[key] = nil; tokens[key] = token }
@@ -205,9 +208,13 @@ private enum UserScrollTracker {
     static func start() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .leftMouseDragged, .keyDown]) { e in
-            if let sv = scrollView(for: e) { last = (ObjectIdentifier(sv), ProcessInfo.processInfo.systemUptime) }
+            if let sv = scrollView(for: e) { note(sv) }
             return e
         }
+    }
+
+    static func note(_ sv: NSScrollView) {
+        last = (ObjectIdentifier(sv), ProcessInfo.processInfo.systemUptime)
     }
 
     static func recentlyScrolled(_ sv: NSScrollView) -> Bool {

@@ -218,6 +218,30 @@ final class TrackNSTableView: NSTableView {
     var onPlayKey: (() -> Void)?
     var onDeleteKey: (() -> Void)?
     var onTypeToSearch: ((Character) -> Void)?
+    private var arrowKeyMonitor: Any?
+
+    /// The search field never passes Up and Down on, so catch them before it sees them: they move
+    /// focus to the list and act on it, so Return then plays the song they landed on.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let arrowKeyMonitor { NSEvent.removeMonitor(arrowKeyMonitor) }
+        arrowKeyMonitor = nil
+        guard window != nil else { return }
+        arrowKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isArrowKeyInSearchField(event), event.window?.makeFirstResponder(self) == true else { return event }
+            if let scrollView = self.enclosingScrollView { ScrollMemory.noteUserScroll(scrollView) }
+            self.keyDown(with: event)
+            return nil
+        }
+    }
+
+    private func isArrowKeyInSearchField(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 125 || event.keyCode == 126,   // Down, Up
+              let window, event.window === window, !isHiddenOrHasHiddenAncestor else { return false }
+        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard mods.isEmpty || mods == .shift else { return false }
+        return (window.firstResponder as? NSTextView)?.delegate is NSSearchField
+    }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)

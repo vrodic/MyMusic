@@ -611,7 +611,10 @@ final class AppModel: ObservableObject {
         }
         try? db.upsert(result.changed)
         try? db.delete(result.removed)
+        // Newly scanned songs start with no stats, and a sync that came first couldn't reach them.
+        await offMain { [db] in db.refreshCache() }
         await store.reloadNow()
+        player.refreshAll(store.track)
         isScanning = false
         Task { await yt.checkLibraryMatches() }
         web?.syncSoon()
@@ -647,6 +650,7 @@ final class AppModel: ObservableObject {
         let t = await AudioScanner.readTrack(.init(url: url, relPath: rel, size: stamp.0, mtime: stamp.1), origin: .server)
         try? db.upsert([t])
         if let item = db.ytItems().first(where: { $0.relPath == rel }), item.favorite { db.setFavorite(rel, true) }
+        db.refreshCache([rel])
         store.reload()
         web?.syncSoon(after: 60)
     }
