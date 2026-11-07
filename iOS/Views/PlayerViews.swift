@@ -10,7 +10,7 @@ struct MiniPlayer: View {
             HStack(spacing: 12) {
                 ArtworkView(image: player.artwork, size: 40)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(t.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                    Text(t.title).font(.subheadline.weight(.medium)).fixedSize(horizontal: false, vertical: true)
                     Text(t.displayArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
@@ -41,6 +41,18 @@ struct NowPlayingView: View {
     @State private var showQueue = false
 
     var body: some View {
+        // Fills the screen as usual, and scrolls only when a long title makes the page too tall.
+        GeometryReader { g in
+            ScrollView {
+                page.frame(minHeight: g.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .sheet(isPresented: $showQueue) { NavigationStack { QueueView() } }
+        .presentationDragIndicator(.hidden)
+    }
+
+    private var page: some View {
         VStack(spacing: 22) {
             Capsule().fill(.secondary.opacity(0.4)).frame(width: 40, height: 5).padding(.top, 8)
             Spacer(minLength: 0)
@@ -49,7 +61,7 @@ struct NowPlayingView: View {
                 let live = store.track(t.relPath) ?? t
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(live.title).font(.title3.bold()).lineLimit(2)
+                        Text(live.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
                         Text("\(live.displayArtist) — \(live.displayAlbum)").foregroundStyle(.secondary).lineLimit(1)
                         Text(live.folder).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                     }
@@ -97,8 +109,6 @@ struct NowPlayingView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 28)
-        .sheet(isPresented: $showQueue) { NavigationStack { QueueView() } }
-        .presentationDragIndicator(.hidden)
     }
 }
 

@@ -48,10 +48,16 @@ struct TrackRowLabel: View {
     let track: Track
     var isCurrent = false
 
+    #if os(macOS)
+    private static let titleLines: Int? = 1
+    #else
+    private static let titleLines: Int? = nil   // phone rows are narrow: wrap so the whole title shows
+    #endif
+
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(track.title).lineLimit(1)
+                Text(track.title).lineLimit(Self.titleLines)
                     .foregroundStyle(isCurrent ? Color.accentColor : .primary)
                     .fontWeight(isCurrent ? .semibold : .regular)
                 Text("\(track.displayArtist) · \(track.displayAlbum)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
