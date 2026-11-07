@@ -41,12 +41,10 @@ struct NowPlayingView: View {
     @State private var showQueue = false
 
     var body: some View {
-        // Fills the screen as usual, and scrolls only when a long title makes the page too tall.
-        GeometryReader { g in
-            ScrollView {
-                page.frame(minHeight: g.size.height)
-            }
-            .scrollBounceBehavior(.basedOnSize)
+        // A plain page when it fits. Only a long title that makes it too tall needs scrolling.
+        ViewThatFits(in: .vertical) {
+            page
+            ScrollView { page.containerRelativeFrame(.horizontal) }
         }
         .sheet(isPresented: $showQueue) { NavigationStack { QueueView() } }
         .presentationDragIndicator(.hidden)
@@ -109,6 +107,7 @@ struct NowPlayingView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity)
     }
 }
 
