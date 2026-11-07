@@ -60,7 +60,21 @@ fileprivate final class ProbeView: NSView {
         self.key = key; self.token = token
         ScrollMemory.check(key, token)
         ScrollMemory.probes.setObject(self, forKey: key as NSString)
-        if (changed || reset) && isAttached { restore() }
+        if (changed || reset) && isAttached {
+            // The list stays alive while its rows change, so this must not undo the coming move to the top.
+            hold = nil
+            generation += 1
+            // After SwiftUI's update pass, so a table sharing it has already reloaded its new rows.
+            DispatchQueue.main.async { [weak self] in self?.listChanged() }
+        }
+    }
+
+    /// Different rows in the same list: go to the requested row, the remembered spot, or the top.
+    private func listChanged() {
+        guard let sv = scrollView else { return }
+        if let row = ScrollMemory.pendingRows[key] { reveal(row) }
+        else if ScrollMemory.offsets[key] != nil { restore() }
+        else { scroll(sv, to: -sv.contentView.contentInsets.top) }
     }
 
     override func viewDidMoveToWindow() {
@@ -126,7 +140,7 @@ fileprivate final class ProbeView: NSView {
             guard let table = sv.documentView as? NSTableView, row < table.numberOfRows else { return nil }
             let r = table.rect(ofRow: row)
             let y = r.midY - sv.contentView.bounds.height / 2
-            return min(max(y, -sv.contentInsets.top), self.maxOffset(sv))
+            return min(max(y, -sv.contentView.contentInsets.top), self.maxOffset(sv))
         }
     }
 
@@ -152,12 +166,12 @@ fileprivate final class ProbeView: NSView {
     }
 
     private func maxOffset(_ sv: NSScrollView) -> CGFloat {
-        (sv.documentView?.frame.height ?? 0) - sv.contentView.bounds.height + sv.contentInsets.bottom
+        (sv.documentView?.frame.height ?? 0) - sv.contentView.bounds.height + sv.contentView.contentInsets.bottom
     }
 
     private func scroll(_ sv: NSScrollView, to y: CGFloat) {
         let clip = sv.contentView
-        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(-sv.contentInsets.top, min(y, maxOffset(sv)))))
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(-sv.contentView.contentInsets.top, min(y, maxOffset(sv)))))
         sv.reflectScrolledClipView(clip)
     }
 

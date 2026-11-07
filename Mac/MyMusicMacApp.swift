@@ -85,8 +85,8 @@ struct ContentView: View {
     /// Sidebar selection: a SidebarItem's raw value, or "pl:<playlist id>".
     @State private var selectionKey: String?
     @State private var search = ""
-    /// Debounced copy of `search` — updated 150 ms after the user stops typing so filtering
-    /// large libraries doesn't block the main thread on every keystroke.
+    /// Debounced copy of `search` — updated 50 ms after the user stops typing so filtering
+    /// large libraries doesn't run on every keystroke of a fast burst.
     @State private var debouncedSearch = ""
     @State private var searchDebounceTask: Task<Void, Never>? = nil
     @State private var isSearchFocused = false
@@ -154,18 +154,22 @@ struct ContentView: View {
         }
         .searchable(text: $search, isPresented: $isSearchFocused, placement: .toolbar, prompt: searchPrompt)
         .onChange(of: search) { _, new in
-            // Debounce: cancel any pending update and schedule a new one 150 ms out,
-            // so filter / sort work doesn't run on every keystroke in large libraries.
+            // Debounce: cancel any pending update and schedule a new one 50 ms out,
+            // so a burst of typing filters and sorts once in large libraries.
             searchDebounceTask?.cancel()
             if new.isEmpty {
                 debouncedSearch = ""   // clear immediately so results disappear at once
             } else {
                 searchDebounceTask = Task {
-                    try? await Task.sleep(for: .milliseconds(150))
+                    try? await Task.sleep(for: .milliseconds(50))
                     guard !Task.isCancelled else { return }
                     debouncedSearch = new
                 }
             }
+        }
+        .environment(\.typeToSearch) { ch in
+            search = String(ch)
+            focusSearchField()
         }
         .onKeyPress(phases: .down) { press in
             guard press.modifiers.isEmpty || press.modifiers == .shift else { return .ignored }

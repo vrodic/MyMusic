@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct TrackTable: View {
     @EnvironmentObject var model: AppModel
@@ -7,8 +8,7 @@ struct TrackTable: View {
     let tracks: [Track]
     var title: String = ""
     var defaultSort = true
-    /// What the rows depend on besides library growth (search text, folder…). When it changes the
-    /// table is rebuilt instead of diffed; a song arriving from a download still updates in place.
+    /// What the rows depend on besides library growth (search text, folder…): part of the default scroll key.
     var resetKey: String = ""
     /// Which list this is, for remembering its scroll position (default: title + resetKey).
     var scrollKey: String? = nil
@@ -24,7 +24,7 @@ struct TrackTable: View {
     @State private var confirmFavorite = false
     @State private var confirmDelete = false
     @State private var tracksPendingDelete: [Track] = []
-    @AppStorage("mac.trackTableColumns") private var columnCustomization = TableColumnCustomization<Track>()
+    @Environment(\.typeToSearch) private var typeToSearch
 
     init(tracks: [Track], title: String = "", defaultSort: Bool = true, resetKey: String = "",
          scrollKey: String? = nil, search: String = "", revealPlace: RevealRequest.Place? = nil,
@@ -49,50 +49,24 @@ struct TrackTable: View {
         _sortOrder = State(initialValue: initialSort)
     }
 
+    @State private var sortMemo = SortMemo()
+
     private var sorted: [Track] {
-        sortOrder.isEmpty ? tracks : tracks.sorted(using: sortOrder)
+        sortOrder.isEmpty ? tracks : sortMemo.sorted(tracks, by: sortOrder)
     }
 
     var body: some View {
         let rows = sorted
-        Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
-            TableColumn("♥", value: \.favoriteSort) { t in
-                // Look up the live copy so the heart reflects in-place favorite toggles
-                // even when the table was built from a stale snapshot (e.g. FolderNode.tracks).
-                let live = store.track(t.relPath) ?? t
-                Button { toggleFavoriteTrack(live) } label: {
-                    Image(systemName: live.favorite ? "heart.fill" : "heart").foregroundStyle(live.favorite ? .pink : .secondary)
-                }.buttonStyle(.plain)
-            }.width(22).customizationID("favorite")
-            TableColumn("Title", value: \.title) { t in
-                Text(t.title).fontWeight(player.current?.relPath == t.relPath ? .bold : .regular)
-            }.customizationID("title")
-            TableColumn("Artist", value: \.displayArtist).customizationID("artist")
-            TableColumn("Album", value: \.displayAlbum).customizationID("album")
-            TableColumn("Time", value: \.durationSort) { Text(($0.duration ?? 0).durationString).monospacedDigit() }.width(55).customizationID("time")
-            TableColumn("Plays", value: \.playCount) { Text("\($0.playCount)").monospacedDigit() }.width(45).customizationID("plays")
-            TableColumn("Format", value: \.fileExtension).width(50).customizationID("format")
-            TableColumn("Favorited", value: \.favoritedSort) { t in
-                if t.favorite, let at = t.favoriteAt, at > 0 {
-                    Text(FastDateFormatter.string(from: at)).monospacedDigit()
-                }
-            }.width(90).customizationID("favorited")
-            TableColumn("Added", value: \.addedAt) { t in
-                if t.addedAt > 0 {
-                    Text(FastDateFormatter.string(from: t.addedAt)).monospacedDigit()
-                }
-            }.width(90).customizationID("added")
-            TableColumn("Last played", value: \.lastPlayedSort) { t in
-                if let at = t.lastPlayed, at > 0 {
-                    Text(FastDateFormatter.string(from: at)).monospacedDigit()
-                }
-            }.width(90).customizationID("lastPlayed")
-        }
-        // When the rows themselves change (search cleared, other view, re-sort), give SwiftUI a new
-        // table instead of letting it diff thousands of rows on the main thread (the beachball).
-        // Property changes (hearts, play counts) keep the same identity and update in place.
+        TrackTableView(
+            rows: rows, selection: $selection, sortOrder: $sortOrder, currentPath: player.current?.relPath,
+            liveTrack: { store.track($0) },
+            onToggleFavorite: toggleFavoriteTrack,
+            onFavoriteHeaderClicked: { if tracks.count > 25 { confirmFavorite = true } else { toggleAllFavorites() } },
+            onPlay: { play($0, in: rows) },
+            onDeleteKey: { triggerShortcutDelete(rows: rows) },
+            onTypeToSearch: typeToSearch,
+            menuItems: { menuItems(for: $0, rows: rows) })
         .rememberScroll(scrollMemoryKey, resetOn: search)
-        .id(TableIdentity.of(resetKey, title, "\(sortOrder)"))
         .onAppear {
             if let key = persistSortKey, let saved = UserDefaults.standard.string(forKey: key) {
                 let loaded = [KeyPathComparator<Track>].from(serialized: saved)
@@ -111,48 +85,12 @@ struct TrackTable: View {
             }
         }
         .onChange(of: model.revealRequest) { handleReveal() }
-        .contextMenu(forSelectionType: Track.ID.self) { ids in
-            let picked = ids.count == 1 ? ids.compactMap { store.track($0) } : rows.filter { ids.contains($0.id) }
-            Button("Play") { play(picked.first, in: rows) }
-            Button("Play Next") { picked.reversed().forEach(player.playNext) }
-            Button("Add to Queue") { picked.forEach(player.addToQueue) }
-            Divider()
-            Button("Toggle Favorite") { picked.forEach(model.toggleFavorite) }
-            SyncMenuItem(paths: picked.map(\.relPath))
-            Divider()
-            PlaylistMenu(tracks: picked)
-            if let pid = playlistID {
-                Button("Remove from Playlist") { model.removeFromPlaylist(pid, picked) }
-                if let first = picked.first { Button("Move to Top") { model.movePlaylistItem(pid, first, toTop: true) } }
-            }
-            if let first = picked.first {
-                Button("Show in Folder") { model.reveal(first, in: .folder) }
-                Button("Show in Finder") { model.revealInFinder(first) }
-            }
-            Divider()
-            Button(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song", role: .destructive) {
-                if picked.count == 1 {
-                    model.deleteSongs(picked)
-                } else {
-                    tracksPendingDelete = picked
-                    confirmDelete = true
-                }
-            }
-        } primaryAction: { ids in
-            play(rows.first { ids.contains($0.id) }, in: rows)
-        }
         .navigationTitle(title)
         .navigationSubtitle("\(tracks.count) songs")
-        .onChange(of: sortOrder) { old, new in
-            // The ♥ header is a "favorite everything shown" button, not a sort.
-            guard new.first?.keyPath == \Track.favoriteSort else {
-                if let key = persistSortKey {
-                    UserDefaults.standard.set(new.serialize(), forKey: key)
-                }
-                return
+        .onChange(of: sortOrder) { _, new in
+            if let key = persistSortKey {
+                UserDefaults.standard.set(new.serialize(), forKey: key)
             }
-            sortOrder = old.filter { $0.keyPath != \Track.favoriteSort }
-            if tracks.count > 25 { confirmFavorite = true } else { toggleAllFavorites() }
         }
         .confirmationDialog(allFavorite ? "Remove all \(tracks.count) songs in this list from favorites?" : "Mark all \(tracks.count) songs in this list as favorites?",
                             isPresented: $confirmFavorite, titleVisibility: .visible) {
@@ -186,6 +124,51 @@ struct TrackTable: View {
         }
     }
 
+    private func menuItems(for ids: Set<Track.ID>, rows: [Track]) -> [NSMenuItem] {
+        let picked = ids.count == 1 ? ids.compactMap { store.track($0) } : rows.filter { ids.contains($0.id) }
+        var items: [NSMenuItem] = [
+            ClosureMenuItem("Play") { play(picked.first, in: rows) },
+            ClosureMenuItem("Play Next") { picked.reversed().forEach(player.playNext) },
+            ClosureMenuItem("Add to Queue") { picked.forEach(player.addToQueue) },
+            .separator(),
+            ClosureMenuItem("Toggle Favorite") { picked.forEach(model.toggleFavorite) },
+        ]
+        let paths = picked.map(\.relPath)
+        if !paths.isEmpty {
+            let allSynced = paths.allSatisfy(model.isSynced)
+            items.append(ClosureMenuItem(allSynced ? "Remove from iPhone Sync" : "Add to iPhone Sync",
+                                         symbol: allSynced ? "iphone.slash" : "iphone.and.arrow.forward") { model.setSynced(paths, !allSynced) })
+        }
+        items.append(.separator())
+
+        let playlists = NSMenu()
+        for p in model.playlists { playlists.addItem(ClosureMenuItem(p.name) { model.addToPlaylist(p.id, picked) }) }
+        if !model.playlists.isEmpty { playlists.addItem(.separator()) }
+        playlists.addItem(ClosureMenuItem("New Playlist…") { if let n = Ask.text("New playlist") { model.createPlaylist(n, with: picked) } })
+        let addToPlaylist = NSMenuItem(title: "Add to Playlist", action: nil, keyEquivalent: "")
+        addToPlaylist.submenu = playlists
+        items.append(addToPlaylist)
+
+        if let pid = playlistID {
+            items.append(ClosureMenuItem("Remove from Playlist") { model.removeFromPlaylist(pid, picked) })
+            if let first = picked.first { items.append(ClosureMenuItem("Move to Top") { model.movePlaylistItem(pid, first, toTop: true) }) }
+        }
+        if let first = picked.first {
+            items.append(ClosureMenuItem("Show in Folder") { model.reveal(first, in: .folder) })
+            items.append(ClosureMenuItem("Show in Finder") { model.revealInFinder(first) })
+        }
+        items.append(.separator())
+        items.append(ClosureMenuItem(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song") {
+            if picked.count == 1 {
+                model.deleteSongs(picked)
+            } else {
+                tracksPendingDelete = picked
+                confirmDelete = true
+            }
+        })
+        return items
+    }
+
     private func triggerShortcutDelete(rows: [Track]) {
         let picked = rows.filter { selection.contains($0.id) }
         guard !picked.isEmpty else { return }
@@ -216,12 +199,13 @@ struct TrackTable: View {
     }
 
     private func play(_ t: Track?, in rows: [Track]) {
-        guard let t, let i = rows.firstIndex(of: t) else { return }
+        // By path: `t` can be a fresher copy than the row (a favorite toggled since it was loaded).
+        guard let t, let i = rows.firstIndex(where: { $0.relPath == t.relPath }) else { return }
         player.play(rows, startAt: i)
     }
 }
 
-private enum TrackSortField: String {
+enum TrackSortField: String, CaseIterable {
     case favorite, title, artist, album, time, plays, format, favorited, added, lastPlayed
 
     static func from(keyPath: AnyKeyPath) -> TrackSortField? {
@@ -498,6 +482,23 @@ struct QueueView: View {
                 .onDelete { player.removeFromQueue(at: $0) }
             }
         }
+    }
+}
+
+/// Keeps the last sort result: `body` runs several times per search and on unrelated updates, and
+/// sorting a whole library by title takes far longer than checking that nothing changed.
+private final class SortMemo {
+    private var input: [Track] = []
+    private var order: [KeyPathComparator<Track>] = []
+    private var output: [Track] = []
+
+    func sorted(_ tracks: [Track], by order: [KeyPathComparator<Track>]) -> [Track] {
+        if order != self.order || tracks != input {
+            input = tracks
+            self.order = order
+            output = tracks.sorted(using: order)
+        }
+        return output
     }
 }
 
