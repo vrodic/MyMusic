@@ -37,6 +37,7 @@ final class WebSetup: ObservableObject {
     @Published private(set) var step: String?
     @Published private(set) var error: String?
     @Published private(set) var isRunning = false
+    @Published private(set) var manualError: String?
     private var resolving = Set<String>()
     private var watcher: Task<Void, Never>?
 
@@ -66,6 +67,57 @@ final class WebSetup: ObservableObject {
         }
     }
 
+    /// A server Bonjour can't find (another subnet, a VPN): "192.168.100.7" or "host:port".
+    func addManual(_ address: String) async {
+        let s = address.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return }
+        manualError = nil
+        guard let base = URL(string: s.hasPrefix("http") ? s : "http://\(s.contains(":") ? s : s + ":47824")"),
+              let (data, resp) = try? await URLSession.shared.data(from: base.appending(path: "api/info")),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let info = try? JSONDecoder().decode(WebPlayerInfo.self, from: data) else {
+            manualError = "No MyMusic server answers at \(s)."
+            return
+        }
+        guard !candidates.contains(where: { $0.base == base }) else { return }
+        candidates.append(Candidate(server: DiscoveredServer(name: s, endpoint: .url(base)), base: base, info: info))
+    }
+
+    /// Whose library to start from ("" = newest, nil = none) as downloaded bytes, if there is one.
+    /// Also checks the token.
+    private func fetchBackup(_ c: Candidate, token: String, backup: String?) async throws -> Data? {
+        var bc = URLComponents(url: c.base.appending(path: "api/peer/backup"), resolvingAgainstBaseURL: false)!
+        if let b = backup, !b.isEmpty { bc.queryItems = [.init(name: "replica", value: b)] }
+        var req = URLRequest(url: bc.url!)
+        if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "X-MyMusic-Token") }
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 { throw SetupError("Wrong token. It's MYMUSIC_TOKEN in ~/.config/mymusic-web.env on \(c.info.name).") }
+        return (status == 200 && backup != nil) ? data : nil
+    }
+
+    private func restore(_ backup: Data, model: AppModel) throws {
+        let tmp = FileManager.default.temporaryDirectory.appending(path: "mymusic-restore-\(UUID().uuidString).sqlite")
+        try backup.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try model.restoreLibrary(from: tmp.path)
+    }
+
+    /// Use the server for the index and the files: no share to mount, nothing to scan.
+    /// `backup` as in `setUp`; pass nil to keep the library this Mac already has.
+    func stream(_ c: Candidate, token: String, backup: String?, model: AppModel) async {
+        isRunning = true; error = nil
+        defer { isRunning = false; step = nil }
+        do {
+            step = "Getting the library from \(c.info.name)…"
+            if let data = try await fetchBackup(c, token: token, backup: backup) { try restore(data, model: model) }
+            await model.useServer(base: c.base, token: token)
+            stop()
+        } catch {
+            self.error = (error as? SetupError)?.message ?? error.localizedDescription
+        }
+    }
+
     /// Mount the share, restore the backup, and switch the app to that library.
     /// `backup`: whose library to start from ("" = newest, nil = none: only sync with the peers).
     func setUp(_ c: Candidate, token: String, backup: String? = "", model: AppModel) async {
@@ -74,14 +126,7 @@ final class WebSetup: ObservableObject {
         do {
             // 1. library backup (also checks the token)
             step = "Downloading the library from \(c.info.name)…"
-            var bc = URLComponents(url: c.base.appending(path: "api/peer/backup"), resolvingAgainstBaseURL: false)!
-            if let b = backup, !b.isEmpty { bc.queryItems = [.init(name: "replica", value: b)] }
-            var req = URLRequest(url: bc.url!)
-            if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "X-MyMusic-Token") }
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if status == 401 { throw SetupError("Wrong token. It's MYMUSIC_TOKEN in ~/.config/mymusic-web.env on \(c.info.name).") }
-            let backup: Data? = (status == 200 && backup != nil) ? data : nil
+            let backup = try await fetchBackup(c, token: token, backup: backup)
 
             // 2. music share
             guard let smb = c.info.smbURL, let url = URL(string: smb), let host = url.host else {
@@ -103,10 +148,7 @@ final class WebSetup: ObservableObject {
             // 3. restore the library (if the main Mac has uploaded one) and switch to it
             if let backup {
                 step = "Restoring the library…"
-                let tmp = FileManager.default.temporaryDirectory.appending(path: "mymusic-restore-\(UUID().uuidString).sqlite")
-                try backup.write(to: tmp)
-                defer { try? FileManager.default.removeItem(at: tmp) }
-                try model.restoreLibrary(from: tmp.path)
+                try restore(backup, model: model)
             }
             model.web.url = c.base.absoluteString
             model.web.token = token

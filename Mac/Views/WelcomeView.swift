@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// Shown until a music root is chosen. Offers to set up from a web player found on the network
-/// (mount its SMB share, restore the main Mac's library), or to pick a folder by hand.
+/// Shown until there's a library to play. Offers a web player found on the network (stream from it,
+/// or mount its SMB share and restore the main Mac's library), or picking a folder by hand.
 struct WelcomeView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var setup = WebSetup()
     @State private var tokens: [String: String] = [:]
     @State private var chosen: [String: String] = [:]   // candidate → backup replica ("" newest, "none")
+    @State private var manualAddress = ""
 
     var body: some View {
         ScrollView {
@@ -14,17 +15,28 @@ struct WelcomeView: View {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
                 Text("Welcome to MyMusic").font(.largeTitle.bold())
 
-                if !setup.candidates.isEmpty && model.store.tracks.isEmpty {
+                if !setup.candidates.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Found on your network").font(.headline)
                         ForEach(setup.candidates) { c in card(c) }
                     }
                     .frame(maxWidth: 520)
-                } else if model.store.tracks.isEmpty {
+                } else {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Looking for a MyMusic web player on your network…").foregroundStyle(.secondary)
                     }
+                }
+
+                VStack(spacing: 4) {
+                    HStack {
+                        TextField("Server address", text: $manualAddress, prompt: Text("192.168.100.7"))
+                            .frame(width: 200)
+                            .onSubmit { Task { await setup.addManual(manualAddress) } }
+                        Button("Connect") { Task { await setup.addManual(manualAddress) } }
+                            .disabled(manualAddress.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if let e = setup.manualError { Text(e).font(.caption).foregroundStyle(.orange) }
                 }
 
                 if let root = model.musicRoot, !model.isRootAvailable {
@@ -101,11 +113,12 @@ struct WelcomeView: View {
                     if let smb = c.info.smbURL { Text(smb).font(.caption2).foregroundStyle(.tertiary) }
                 }
             }
+            let hasLibrary = !model.store.tracks.isEmpty   // starting from a backup would replace it
             if c.info.tokenRequired == true {
                 SecureField("Token (MYMUSIC_TOKEN on \(c.info.name))", text: Binding(get: { tokens[c.id] ?? "" }, set: { tokens[c.id] = $0 }))
                     .onSubmit { Task { await setup.loadBackups(c, token: tokens[c.id] ?? "") } }
             }
-            if let list = setup.backups[c.id] {
+            if !hasLibrary, let list = setup.backups[c.id] {
                 Picker("Start from", selection: Binding(get: { chosen[c.id] ?? "" }, set: { chosen[c.id] = $0 })) {
                     Text("Newest backup").tag("")
                     ForEach(list) { b in
@@ -114,13 +127,17 @@ struct WelcomeView: View {
                     Text("No backup – just sync with the other devices").tag("none")
                 }
                 .help("Several Macs back up here, each in its own slot. Favorites, plays and playlists also arrive from the other devices either way.")
-            } else if c.info.tokenRequired != true || !(tokens[c.id] ?? "").isEmpty {
+            } else if !hasLibrary, c.info.tokenRequired != true || !(tokens[c.id] ?? "").isEmpty {
                 Button("Show Backups") { Task { await setup.loadBackups(c, token: tokens[c.id] ?? "") } }.buttonStyle(.link)
             }
-            Text(c.info.macBackupAt == nil
-                 ? "Connects to the music share and scans it. Plays and favorites from the web player carry over; a full library (play counts, iPhone backups, YouTube queue) needs the main Mac to sync with the web player once."
-                 : "Connects to the music share (macOS asks for its username and password if needed) and restores the library: play counts, favorites, iPhone backups, the YouTube queue and sync settings.")
+            Text("Stream: uses \(c.info.name)'s song list and plays from it, with no share to mount and nothing to scan. Deleting songs, finding duplicates and YouTube downloads need the music folder.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !hasLibrary {
+                Text(c.info.macBackupAt == nil
+                     ? "Set Up: connects to the music share and scans it. Plays and favorites from the web player carry over; a full library (play counts, iPhone backups, YouTube queue) needs the main Mac to sync with the web player once."
+                     : "Set Up: connects to the music share (macOS asks for its username and password if needed) and restores the library: play counts, favorites, iPhone backups, the YouTube queue and sync settings.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 if setup.isRunning {
                     ProgressView().controlSize(.small)
@@ -129,9 +146,16 @@ struct WelcomeView: View {
                     Label(e, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button("Set Up from \(c.info.name)") {
+                if !hasLibrary {
+                    Button("Set Up from \(c.info.name)") {
+                        let pick = chosen[c.id] ?? ""
+                        Task { await setup.setUp(c, token: tokens[c.id] ?? "", backup: pick == "none" ? nil : pick, model: model) }
+                    }
+                    .disabled(setup.isRunning || (c.info.tokenRequired == true && (tokens[c.id] ?? "").isEmpty))
+                }
+                Button("Stream from \(c.info.name)") {
                     let pick = chosen[c.id] ?? ""
-                    Task { await setup.setUp(c, token: tokens[c.id] ?? "", backup: pick == "none" ? nil : pick, model: model) }
+                    Task { await setup.stream(c, token: tokens[c.id] ?? "", backup: hasLibrary || pick == "none" ? nil : pick, model: model) }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(setup.isRunning || (c.info.tokenRequired == true && (tokens[c.id] ?? "").isEmpty))

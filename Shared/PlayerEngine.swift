@@ -185,6 +185,8 @@ final class PlayerEngine: ObservableObject {
     var currentTime: Double { clock.time }
     @Published private(set) var duration: Double = 0
     @Published private(set) var artwork: PlatformImage?
+    /// Why the current song isn't playing, for the player bar.
+    @Published private(set) var playbackError: String?
     @Published var shuffle = false { didSet { if !restoring { applyShuffle() } } }
     @Published var repeatMode: RepeatMode = .off
     @Published var volume: Float = 1 { didSet { player.volume = volume } }
@@ -367,7 +369,7 @@ final class PlayerEngine: ObservableObject {
         isSeeking = false
         seekID += 1
         player.replaceCurrentItem(with: nil); queue = []; originalQueue = []; index = 0
-        isPlaying = false; clock.time = 0; duration = 0; artwork = nil
+        isPlaying = false; clock.time = 0; duration = 0; artwork = nil; playbackError = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         saveState()
     }
@@ -506,12 +508,67 @@ final class PlayerEngine: ObservableObject {
         if memoryCache.data(for: nextTrack.relPath) != nil { return }
         let nextURL = urlFor(nextTrack)
         prefetchTask = Task { [weak self] in
-            let data = await Task.detached { try? Data(contentsOf: nextURL) }.value
+            let data = await Self.offMainCancellable { () -> Data? in
+                var out = Data()
+                let ok = await Self.readChunks(from: nextURL) { out.append($0) }
+                return ok ? out : nil
+            }
             guard !Task.isCancelled, let data else { return }
             await MainActor.run { [weak self] in
                 self?.memoryCache.set(data, for: nextTrack.relPath)
             }
         }
+    }
+
+    /// Runs `work` off the main thread. Cancelling the caller cancels it too, which a plain detached
+    /// task doesn't do: skipping a song would leave its download running to the end.
+    nonisolated private static func offMainCancellable<T: Sendable>(_ work: @escaping @Sendable () async -> T) async -> T {
+        let task = Task.detached(operation: work)
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
+    /// For the web player: a server that's gone should show up as an error in seconds, not minutes.
+    nonisolated private static let webSession: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 10
+        return URLSession(configuration: c)
+    }()
+
+    /// Reads a song piece by piece from disk or from the web player. False if it couldn't be read
+    /// to the end (or the task was cancelled).
+    nonisolated private static func readChunks(from url: URL, _ consume: (Data) -> Void) async -> Bool {
+        if url.isFileURL {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+            defer { try? handle.close() }
+            while !Task.isCancelled {
+                let chunk = (try? handle.read(upToCount: 128 * 1024)) ?? Data()
+                if chunk.isEmpty { return true }
+                consume(chunk)
+            }
+            return false
+        }
+        // Range requests rather than one long download: a dropped connection only repeats one
+        // piece, so a Wi-Fi blip doesn't restart the song.
+        let chunkSize = 512 * 1024
+        var offset = 0, failures = 0
+        while !Task.isCancelled {
+            var req = URLRequest(url: url)
+            req.setValue("bytes=\(offset)-\(offset + chunkSize - 1)", forHTTPHeaderField: "Range")
+            guard let (data, resp) = try? await webSession.data(for: req), let http = resp as? HTTPURLResponse else {
+                failures += 1
+                if failures >= 3 || Task.isCancelled { return false }
+                try? await Task.sleep(for: .seconds(1))
+                continue
+            }
+            failures = 0
+            if http.statusCode == 416 { return true }   // already at the end
+            // a whole file (200) only makes sense as the first piece
+            guard http.statusCode == 206 || (http.statusCode == 200 && offset == 0) else { return false }
+            if !data.isEmpty { consume(data) }
+            offset += data.count
+            if http.statusCode == 200 || data.count < chunkSize { return !Task.isCancelled }
+        }
+        return false
     }
 
     private func load(autoplay: Bool) {
@@ -523,6 +580,7 @@ final class PlayerEngine: ObservableObject {
         pendingSeek = nil; statusObservation = nil
         duration = t.duration ?? 0
         artwork = nil
+        playbackError = nil
         loadTask?.cancel()
         currentResourceLoader?.cancelAll()
 
@@ -541,14 +599,9 @@ final class PlayerEngine: ObservableObject {
                 let safeThreshold = min(Int(fileSize > 0 ? fileSize : 256 * 1024), 256 * 1024)
                 let loader = MemoryResourceLoader(expectedLength: fileSize, fileExtension: safeExt)
 
-                let (readSuccess, started) = await Task.detached { () -> (Bool, Bool) in
-                    guard let handle = try? FileHandle(forReadingFrom: url) else { return (false, false) }
-                    defer { try? handle.close() }
-                    let chunkSize = 128 * 1024
+                let (readSuccess, started) = await Self.offMainCancellable { () -> (Bool, Bool) in
                     var didStart = false
-                    while !Task.isCancelled {
-                        let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
-                        if chunk.isEmpty { break }
+                    let ok = await Self.readChunks(from: url) { chunk in
                         loader.append(chunk: chunk)
                         if !didStart && loader.currentData.count >= safeThreshold {
                             didStart = true
@@ -562,9 +615,10 @@ final class PlayerEngine: ObservableObject {
                         loader.cancelAll()
                         return (false, didStart)
                     }
+                    guard ok else { return (false, didStart) }
                     loader.markComplete()
                     return (true, didStart)
-                }.value
+                }
 
                 guard !Task.isCancelled else {
                     loader.cancelAll()
@@ -580,11 +634,11 @@ final class PlayerEngine: ObservableObject {
                         self.setupPlayerItem(with: loader, safeExt: safeExt, for: t, autoplay: autoplay)
                     }
                     self.memoryCache.set(loader.currentData, for: t.relPath)
+                    self.updateCacheEvictionAndPrefetch()
                 } else {
                     loader.cancelAll()
-                    self.setupPlayerItemWithURL(url: url, for: t, autoplay: autoplay)
+                    self.loadFailed()
                 }
-                self.updateCacheEvictionAndPrefetch()
             }
         }
 
@@ -592,11 +646,19 @@ final class PlayerEngine: ObservableObject {
         saveState()
 
         Task { [weak self] in
-            let data = await AudioScanner.artwork(url: url)
+            let data = await Self.artwork(url: url)
             guard let self, self.current?.relPath == t.relPath else { return }
             self.artwork = data.flatMap { PlatformImage(data: $0) }
             self.updateNowPlaying()
         }
+    }
+
+    /// The song couldn't be read: stop and say so. Pressing play tries again.
+    private func loadFailed() {
+        player.replaceCurrentItem(with: nil)
+        isPlaying = false
+        playbackError = "Couldn't load this song"
+        updateNowPlaying()
     }
 
     private func tick(_ t: Double) {
@@ -620,6 +682,15 @@ final class PlayerEngine: ObservableObject {
         if repeatMode == .one { seek(to: 0); player.play(); counted = false; return }
         counted = true // don't count the end as a skip
         next()
+    }
+
+    /// From the file, or from the web player, which extracts it (reading it from a stream URL
+    /// would make AVFoundation download the whole song again).
+    nonisolated private static func artwork(url: URL) async -> Data? {
+        if url.isFileURL { return await AudioScanner.artwork(url: url) }
+        guard let art = MyMusicService.webArtURL(forStream: url), let (data, resp) = try? await webSession.data(from: art),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
     }
 
     private func activateSession() {

@@ -24,28 +24,28 @@ struct MyMusicMacApp: App {
             }
             CommandMenu("Controls") {
                 Button("Play/Pause") { model.player.togglePlay() }.keyboardShortcut(.space, modifiers: [])
-                    .disabled(!model.isRootAvailable)
+                    .disabled(!model.isLibraryAvailable)
                 Button("Next") { model.player.next() }.keyboardShortcut(.rightArrow, modifiers: .command)
-                    .disabled(!model.isRootAvailable)
+                    .disabled(!model.isLibraryAvailable)
                 Button("Previous") { model.player.previous() }.keyboardShortcut(.leftArrow, modifiers: .command)
-                    .disabled(!model.isRootAvailable)
+                    .disabled(!model.isLibraryAvailable)
                 Divider()
                 Button("Skip Forward 15 Seconds") { model.player.skipForward(15) }.keyboardShortcut(.rightArrow, modifiers: [])
-                    .disabled(!model.isRootAvailable || model.player.current == nil)
+                    .disabled(!model.isLibraryAvailable || model.player.current == nil)
                 Button("Skip Backward 15 Seconds") { model.player.skipBackward(15) }.keyboardShortcut(.leftArrow, modifiers: [])
-                    .disabled(!model.isRootAvailable || model.player.current == nil)
+                    .disabled(!model.isLibraryAvailable || model.player.current == nil)
                 Divider()
                 Button("Toggle Favorite") {
                     model.toggleFavoriteCurrentOrSelected()
                 }.keyboardShortcut("f", modifiers: .command)
-                    .disabled(!model.isRootAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
+                    .disabled(!model.isLibraryAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
                 Button("Show in Folder") {
                     model.showInFolderCurrentOrSelected()
                 }.keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!model.isRootAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
+                    .disabled(!model.isLibraryAvailable || (model.player.current == nil && model.selectedTrackPaths.isEmpty))
                 Divider()
                 Button("Rescan Library") { Task { await model.rescan() } }.keyboardShortcut("r", modifiers: .command)
-                    .disabled(!model.isRootAvailable || model.isScanning)
+                    .disabled(!model.isLibraryAvailable || model.isScanning)
             }
         }
         Settings {
@@ -130,7 +130,7 @@ struct ContentView: View {
                     ForEach([SidebarItem.youtube, .duplicates, .stats, .sync]) { Label($0.rawValue, systemImage: $0.icon).tag($0.rawValue) }
                 }
             }
-            .disabled(!model.isRootAvailable)
+            .disabled(!model.isLibraryAvailable)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -140,14 +140,14 @@ struct ContentView: View {
             }
         } detail: {
             Group {
-                if model.musicRoot == nil || !model.isRootAvailable {
+                if !model.isLibraryAvailable {
                     WelcomeView()
                 } else {
                     detail
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if model.isRootAvailable {
+                if model.isLibraryAvailable {
                     PlayerBar()
                 }
             }
@@ -215,13 +215,13 @@ struct ContentView: View {
                     Button { model.online.forEach { model.requestSync($0.id) } } label: {
                         Label("Sync iPhone", systemImage: "iphone.and.arrow.forward")
                     }
-                    .disabled(!model.isRootAvailable || model.online.isEmpty)
+                    .disabled(!model.isLibraryAvailable || model.online.isEmpty)
                     .help(model.online.isEmpty ? "Open MyMusic on your iPhone to sync from here" : "Sync " + model.online.map(\.name).joined(separator: ", "))
                 }
             }
             ToolbarItem {
                 Button { Task { await model.rescan() } } label: { Label("Rescan", systemImage: "arrow.clockwise") }
-                    .disabled(model.isScanning || !model.isRootAvailable)
+                    .disabled(model.isScanning || !model.isLibraryAvailable)
             }
         }
     }

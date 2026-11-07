@@ -49,7 +49,7 @@ final class WebLibrary: ObservableObject {
             var tc = URLComponents(url: base.appending(path: "api/tracks"), resolvingAgainstBaseURL: false)!
             tc.queryItems = [URLQueryItem(name: "user", value: model.db.currentUser)]
             let (tdata, _) = try await session.data(from: tc.url!)
-            let list = try JSONDecoder().decode([ServerTrack].self, from: tdata).map(\.track)
+            let list = try JSONDecoder().decode([WebPlayerTrack].self, from: tdata).map(\.track)
             serverTracks = list.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         } catch {
             self.base = nil   // server gone or moved: look again next time
@@ -71,9 +71,7 @@ final class WebLibrary: ObservableObject {
     // MARK: streaming
 
     func streamURL(_ t: Track) -> URL {
-        var c = URLComponents(url: (base ?? URL(string: "http://invalid")!).appending(path: "api/stream"), resolvingAgainstBaseURL: false)!
-        c.percentEncodedQueryItems = [URLQueryItem(name: "path", value: t.relPath.addingPercentEncoding(withAllowedCharacters: .alphanumerics))]
-        return c.url!
+        MyMusicService.webStreamURL(base: base ?? URL(string: "http://invalid")!, relPath: t.relPath)
     }
 
     /// Plays and favorites of streamed songs are recorded on the web player (→ the Mac on its next sync).
@@ -122,35 +120,5 @@ final class WebLibrary: ObservableObject {
             }
         }
         await model.store.reloadNow()
-    }
-}
-
-/// A song as the web player lists it (its own "origin" values, extra fields), turned into a
-/// streamable `Track`.
-private struct ServerTrack: Decodable {
-    var relPath: String
-    var size: Int64
-    var mtime: Double
-    var title: String
-    var artist: String?
-    var album: String?
-    var albumArtist: String?
-    var trackNumber: Int?
-    var discNumber: Int?
-    var duration: Double?
-    var genre: String?
-    var year: Int?
-    var source: String?
-    var addedAt: Double?
-    var playCount: Int?
-    var lastPlayed: Double?
-    var favorite: Bool?
-    var favoriteAt: Double?
-
-    var track: Track {
-        Track(relPath: relPath, size: size, mtime: mtime, title: title, artist: artist, album: album, albumArtist: albumArtist,
-              trackNumber: trackNumber, discNumber: discNumber, duration: duration, genre: genre, year: year,
-              source: TrackSource(rawValue: source ?? "") ?? .local, origin: .remote, addedAt: addedAt ?? 0,
-              playCount: playCount ?? 0, lastPlayed: lastPlayed, favorite: favorite ?? false, favoriteAt: favoriteAt)
     }
 }

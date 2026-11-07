@@ -44,3 +44,19 @@ targets:
         # Signed with your Apple Development cert (not ad hoc) so macOS keeps the
         # Full Disk Access / Local Network grants across rebuilds.
         CODE_SIGN_IDENTITY: "Apple Development"
+  # Only the database code, not the app: a hosted test would launch MyMusic against your real library.
+  MyMusicTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+      - Shared/SQLite.swift
+      - Shared/SyncStore.swift
+      - Shared/LibraryDB.swift
+      - Shared/Models.swift
+    scheme:
+      testTargets: [MyMusicTests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vrodic.mymusic.tests
+        GENERATE_INFOPLIST_FILE: YES

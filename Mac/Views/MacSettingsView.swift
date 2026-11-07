@@ -15,6 +15,9 @@ struct MacSettingsView: View {
                 if model.musicRoot != nil {
                     LabeledContent("Status", value: model.isRootAvailable ? "Available" : "Unavailable (unmounted or missing)")
                 }
+                if model.usingServer {
+                    LabeledContent("Songs from", value: model.web.url)
+                }
                 HStack {
                     Button("Change Music Root…") { model.chooseRoot() }
                     if model.musicRoot != nil && !model.isRootAvailable {

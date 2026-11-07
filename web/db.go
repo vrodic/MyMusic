@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -201,6 +203,26 @@ func (db *DB) AllTracks() ([]WebTrack, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// LibraryVersion changes when songs are added, removed or their files change, and not on a
+// rescan or a Mac push that found nothing new, so clients can skip re-reading the whole list.
+func (db *DB) LibraryVersion() string {
+	rows, err := db.sql.Query("SELECT rel_path, size, mtime FROM tracks ORDER BY rel_path")
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	h := fnv.New64a()
+	for rows.Next() {
+		var p string
+		var size int64
+		var mtime float64
+		if rows.Scan(&p, &size, &mtime) == nil {
+			fmt.Fprintf(h, "%s\x00%d\x00%.0f\n", p, size, mtime)
+		}
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 func (db *DB) Has(relPath string) bool {

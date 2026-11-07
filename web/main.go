@@ -133,6 +133,7 @@ func (s *server) info(w http.ResponseWriter, r *http.Request) {
 		"name": s.name, "trackCount": len(ts),
 		"lastMacSync": s.db.Meta("lastMacSync"), "macName": s.db.Meta("macName"), "lastScan": s.db.Meta("lastScan"),
 		"smbURL": s.smbURL, "tokenRequired": s.token != "", "macBackupAt": s.db.Meta("macBackupAt"), "replica": s.replica, "backupCount": len(s.backups()),
+		"libraryVersion": s.db.LibraryVersion(),
 	})
 }
 
@@ -156,12 +157,23 @@ func (s *server) tracks(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolve maps a relPath from the client to a file, refusing anything outside the library.
+// A Mac may ask in its own accent spelling (it indexed the share as NFD; this disk is usually
+// NFC), so a song it knows from its own scan can stream from here when the share isn't mounted.
 func (s *server) resolve(rel string) (string, bool) {
 	clean := path.Clean("/" + rel)[1:]
-	if clean == "" || clean != rel || strings.HasPrefix(clean, "../") || !s.db.Has(rel) {
+	if clean == "" || clean != rel || strings.HasPrefix(clean, "../") {
 		return "", false
 	}
-	return filepath.Join(s.root, filepath.FromSlash(clean)), true
+	candidates := []string{rel}
+	if !isASCII(rel) {
+		candidates = append(candidates, norm.NFC.String(rel), norm.NFD.String(rel))
+	}
+	for _, p := range candidates {
+		if s.db.Has(p) {
+			return filepath.Join(s.root, filepath.FromSlash(p)), true
+		}
+	}
+	return "", false
 }
 
 func (s *server) stream(w http.ResponseWriter, r *http.Request) {

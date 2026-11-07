@@ -11,7 +11,11 @@ struct MiniPlayer: View {
                 ArtworkView(image: player.artwork, size: 40)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(t.title).font(.subheadline.weight(.medium)).fixedSize(horizontal: false, vertical: true)
-                    Text(t.displayArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if let error = player.playbackError {
+                        Text(error).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    } else {
+                        Text(t.displayArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 Spacer()
                 Button { player.togglePlay() } label: { Image(systemName: player.isPlaying ? "pause.fill" : "play.fill").font(.title3) }
@@ -60,7 +64,11 @@ struct NowPlayingView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(live.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
-                        Text("\(live.displayArtist) — \(live.displayAlbum)").foregroundStyle(.secondary).lineLimit(1)
+                        if let error = player.playbackError {
+                            Text(error).foregroundStyle(.orange).lineLimit(1)
+                        } else {
+                            Text("\(live.displayArtist) — \(live.displayAlbum)").foregroundStyle(.secondary).lineLimit(1)
+                        }
                         Text(live.folder).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                     }
                     Spacer()

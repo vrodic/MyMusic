@@ -12,6 +12,7 @@ struct HTTPRequest {
 enum HTTPResponse {
     case data(status: Int, contentType: String, body: Data)
     case file(URL)
+    case redirect(URL)
     case notFound
     case badRequest(String)
 
@@ -61,6 +62,8 @@ final class HTTPServer: @unchecked Sendable {
     }
 
     func stop() { listener?.cancel(); listener = nil }
+
+    var isRunning: Bool { listener != nil }
 
     private func accept(_ c: NWConnection) {
         c.start(queue: queue)
@@ -113,6 +116,7 @@ final class HTTPServer: @unchecked Sendable {
         case .notFound: sendSimple(c, 404, "not found")
         case .badRequest(let m): sendSimple(c, 400, m)
         case .file(let url): sendFile(c, url: url, range: req.headers["range"], headOnly: req.method == "HEAD")
+        case .redirect(let url): send(c, status: 302, headers: ["Location": url.absoluteString, "Content-Length": "0"], body: Data())
         }
     }
 
@@ -121,7 +125,7 @@ final class HTTPServer: @unchecked Sendable {
     }
 
     private func head(_ status: Int, _ headers: [String: String]) -> Data {
-        let reason = [200: "OK", 206: "Partial Content", 400: "Bad Request", 404: "Not Found", 413: "Payload Too Large", 416: "Range Not Satisfiable", 500: "Internal Server Error"][status] ?? "OK"
+        let reason = [200: "OK", 206: "Partial Content", 302: "Found", 400: "Bad Request", 404: "Not Found", 413: "Payload Too Large", 416: "Range Not Satisfiable", 500: "Internal Server Error", 503: "Service Unavailable"][status] ?? "OK"
         var s = "HTTP/1.1 \(status) \(reason)\r\nConnection: close\r\n"
         for (k, v) in headers { s += "\(k): \(v)\r\n" }
         return Data((s + "\r\n").utf8)

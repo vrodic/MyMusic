@@ -68,14 +68,26 @@ final class WebPeer: ObservableObject {
     }
 
     func sync() async {
-        guard !isSyncing, model.isRootAvailable, var push = request("api/peer/library") else { return }
+        guard !isSyncing, model.isLibraryAvailable, let base = baseURL else { return }
         isSyncing = true
         defer { isSyncing = false }
         do {
             // 1. plays, favorites, users, playlists and the YouTube queue: the peer exchange
-            if let base = baseURL, let info = try? await fetchInfo(base), let id = info.replica {
+            let info = try? await fetchInfo(base)
+            if let info, let id = info.replica {
                 await model.peers.exchange(base: base, token: token, peerID: id, name: info.name, kind: "web player")
                 webDeviceName = info.name
+            }
+
+            // Streaming from the server: its list is the library. Nothing below applies, and pushing
+            // this Mac's list would make the server drop any song missing from it.
+            if model.usingServer {
+                guard let info else { throw URLError(.cannotConnectToHost) }
+                await model.serverAnswered(at: base, info: info)
+                lastResult = "Streaming from \(info.name) · \(info.trackCount) songs"
+                lastSync = Date()
+                lastError = nil
+                return
             }
 
             // 2. duplicates removed on the web player (before pushing, or the push would re-add them)
@@ -99,6 +111,7 @@ final class WebPeer: ObservableObject {
             }
 
             // 3. push song details (tags, lengths): the web player reads its stats from the exchange
+            guard var push = request("api/peer/library") else { return }
             let tracks = model.db.allTracks()
             let manifest = LibraryManifest(serverName: model.serverName, apiVersion: MyMusicService.apiVersion,
                                            generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: model.db.recentMerges())
@@ -162,7 +175,13 @@ final class WebPeer: ObservableObject {
         }
     }
 
-    private func fetchInfo(_ base: URL) async throws -> WebPlayerInfo {
+    func fetchTracks(_ base: URL) async throws -> [Track] {
+        let (data, resp) = try await session.data(from: base.appending(path: "api/tracks"))
+        try check(resp, data)
+        return try JSONDecoder().decode([WebPlayerTrack].self, from: data).map(\.track)
+    }
+
+    func fetchInfo(_ base: URL) async throws -> WebPlayerInfo {
         let (data, resp) = try await session.data(from: base.appending(path: "api/info"))
         try check(resp, data)
         return try JSONDecoder().decode(WebPlayerInfo.self, from: data)

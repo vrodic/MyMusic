@@ -23,7 +23,7 @@ struct DuplicatesView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Button { Task { await scan() } } label: { Label(scanned ? "Rescan" : "Find Duplicates", systemImage: "doc.on.doc") }
-                    .disabled(scanning || model.musicRoot == nil)
+                    .disabled(scanning || !model.isRootAvailable)
                 if scanning { ProgressView().controlSize(.small); Text(progress).foregroundStyle(.secondary) }
                 Spacer()
                 if !groups.isEmpty {
@@ -97,7 +97,7 @@ struct DuplicatesView: View {
     }
 
     private func scan() async {
-        guard let root = model.musicRoot else { return }
+        guard model.isRootAvailable, let root = model.musicRoot else { return }
         scanning = true
         let tracks = model.store.tracks
         groups = await Task.detached {

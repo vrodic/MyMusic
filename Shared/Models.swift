@@ -7,6 +7,22 @@ enum MyMusicService {
     static let defaultPort: UInt16 = 47823
     static let apiVersion = 1
     static let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aif", "aiff", "caf", "alac", "m4b", "mp4"]
+
+    /// Where the web player serves a song's bytes (with Range support).
+    static func webStreamURL(base: URL, relPath: String) -> URL {
+        // Plain ASCII only: .alphanumerics would leave accented letters unescaped.
+        let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        var c = URLComponents(url: base.appending(path: "api/stream"), resolvingAgainstBaseURL: false)!
+        c.percentEncodedQueryItems = [URLQueryItem(name: "path", value: relPath.addingPercentEncoding(withAllowedCharacters: safe))]
+        return c.url!
+    }
+
+    /// The same song's cover art, from its stream URL.
+    static func webArtURL(forStream stream: URL) -> URL? {
+        guard var c = URLComponents(url: stream, resolvingAgainstBaseURL: false), c.path.hasSuffix("/stream") else { return nil }
+        c.path = String(c.path.dropLast("stream".count)) + "art"
+        return c.url
+    }
 }
 
 enum TrackSource: String, Codable { case local, youtube }
@@ -115,6 +131,36 @@ struct WebPlayerInfo: Codable, Hashable {
     var lastMacSync: String?
     var macName: String?
     var replica: String? = nil
+    var libraryVersion: String? = nil   // changes only when the songs do
+}
+
+/// A song as the web player lists it (GET /api/tracks: its own "origin" values, extra fields).
+struct WebPlayerTrack: Decodable {
+    var relPath: String
+    var size: Int64
+    var mtime: Double
+    var title: String
+    var artist: String?
+    var album: String?
+    var albumArtist: String?
+    var trackNumber: Int?
+    var discNumber: Int?
+    var duration: Double?
+    var genre: String?
+    var year: Int?
+    var source: String?
+    var addedAt: Double?
+    var playCount: Int?
+    var lastPlayed: Double?
+    var favorite: Bool?
+    var favoriteAt: Double?
+
+    var track: Track {
+        Track(relPath: relPath, size: size, mtime: mtime, title: title, artist: artist, album: album, albumArtist: albumArtist,
+              trackNumber: trackNumber, discNumber: discNumber, duration: duration, genre: genre, year: year,
+              source: TrackSource(rawValue: source ?? "") ?? .local, origin: .remote, addedAt: addedAt ?? 0,
+              playCount: playCount ?? 0, lastPlayed: lastPlayed, favorite: favorite ?? false, favoriteAt: favoriteAt)
+    }
 }
 
 struct DeviceBackup: Codable, Identifiable, Hashable {

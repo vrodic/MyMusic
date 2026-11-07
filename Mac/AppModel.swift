@@ -2,10 +2,17 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// Where this Mac's songs are right now.
+enum LibrarySource: Equatable {
+    case none            // music folder out of reach, and no web player to use instead
+    case folder(URL)
+    case server(URL)     // the web player's address: its index replaces scanning
+}
+
 /// Thread-safe state the HTTP server reads from its own queue.
 final class ServerBackend: @unchecked Sendable {
     private let lock = NSLock()
-    private var _root: URL?
+    private var _source = LibrarySource.none
     private var _selection = FolderSelection()
     private var _syncFavorites = false
     let db: LibraryDB
@@ -57,10 +64,20 @@ final class ServerBackend: @unchecked Sendable {
 
     init(db: LibraryDB, name: String) { self.db = db; self.name = name }
 
-    func update(root: URL?, selection: FolderSelection, syncFavorites: Bool) {
-        lock.withLock { _root = root; _selection = selection; _syncFavorites = syncFavorites }
+    func update(source: LibrarySource, selection: FolderSelection, syncFavorites: Bool) {
+        lock.withLock { _source = source; _selection = selection; _syncFavorites = syncFavorites }
     }
-    private var snapshot: (URL?, FolderSelection, Bool) { lock.withLock { (_root, _selection, _syncFavorites) } }
+    private var source: LibrarySource { lock.withLock { _source } }
+    private var snapshot: (FolderSelection, Bool) { lock.withLock { (_selection, _syncFavorites) } }
+
+    /// Where this Mac's own player reads a song from.
+    func playbackURL(_ relPath: String) -> URL {
+        switch source {
+        case .folder(let root): root.appendingFile(relPath)
+        case .server(let base): MyMusicService.webStreamURL(base: base, relPath: relPath)
+        case .none: URL(fileURLWithPath: "/", isDirectory: true).appendingFile(relPath)   // fails, and the player says so
+        }
+    }
 
     /// What an iPhone of `user` gets: that user's ticked folders, plus (if they chose so) their
     /// favorites, plus the songs in their playlists.
@@ -81,13 +98,12 @@ final class ServerBackend: @unchecked Sendable {
 
     /// A track goes to devices if its folder is ticked, or it's a favorite (Mac or any device) and "sync favorites" is on.
     func syncFilter() -> (Track) -> Bool {
-        let (_, selection, favs) = snapshot
+        let (selection, favs) = snapshot
         // iPhone favorites are merged into the Mac's own favorites on upload, so t.favorite covers both.
         return { t in selection.contains(relPath: t.relPath) || (favs && t.favorite) }
     }
 
     func handle(_ req: HTTPRequest) -> HTTPResponse {
-        let (root, _, _) = snapshot
         switch (req.method, req.path) {
         case ("GET", "/api/info"):
             let all = db.allTracks()
@@ -96,14 +112,24 @@ final class ServerBackend: @unchecked Sendable {
         case ("GET", "/api/library"):
             let filter = req.query["user"].map { syncFilter(user: $0) } ?? syncFilter()
             let tracks = db.allTracks().filter(filter)
+            // While streaming, an empty list can just mean this Mac's sync choices haven't arrived
+            // from the peers yet, and a phone deletes synced songs that aren't listed.
+            if case .server = source, tracks.isEmpty {
+                return .data(status: 503, contentType: "text/plain", body: Data("no songs to sync yet".utf8))
+            }
             return .json(LibraryManifest(serverName: name, apiVersion: MyMusicService.apiVersion,
                                          generatedAt: Date().timeIntervalSince1970, tracks: tracks, merges: db.recentMerges()))
         case ("GET", "/api/file"), ("HEAD", "/api/file"):
             // any song in the library (other users' playlists and streaming need more than this Mac's selection)
-            guard let root, let rel = req.query["path"], db.track(relPath: rel) != nil else { return .notFound }
+            guard let rel = req.query["path"], db.track(relPath: rel) != nil else { return .notFound }
             // Only indexed paths get here; reject any ".." without touching the file system.
             guard !rel.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { return .notFound }
-            return .file(root.appendingFile(rel))
+            switch source {
+            case .folder(let root): return .file(root.appendingFile(rel))
+            // this Mac can't reach the files, so send the phone to the web player that has them
+            case .server(let base): return .redirect(MyMusicService.webStreamURL(base: base, relPath: rel))
+            case .none: return .notFound
+            }
         case ("POST", "/api/stats"):
             guard let up = try? JSONDecoder().decode(StatsUpload.self, from: req.body) else { return .badRequest("bad json") }
             do { try db.storeDeviceStats(up) } catch { return .data(status: 500, contentType: "text/plain", body: Data("\(error)".utf8)) }
@@ -160,9 +186,17 @@ final class AppModel: ObservableObject {
     }
     func reveal(_ t: Track, in place: RevealRequest.Place) { revealRequest = RevealRequest(relPath: t.relPath, place: place) }
     @Published private(set) var musicRoot: URL?
-    @Published private(set) var isRootAvailable = false
     /// Music root is on SMB/AFP/NFS: avoid optional file-system calls.
     @Published private(set) var rootIsRemote = false
+    /// Features that change files need `.folder`; playing and syncing work from either source.
+    @Published private(set) var source = LibrarySource.none { didSet { pushBackend() } }
+    var isRootAvailable: Bool { if case .folder = source { true } else { false } }
+    var usingServer: Bool { if case .server = source { true } else { false } }
+    var isLibraryAvailable: Bool { source != .none }
+    /// The server's library version the local index was built from, to skip re-reading an unchanged one.
+    private var serverIndexVersion: String?
+    private var isRefreshingServerIndex = false
+    private static let serverChosenKey = "library.useServer"
     // Sync choices belong to the current user (and replicate to the other Macs).
     @Published var selection: FolderSelection { didSet { if !loadingUser { saveSelection() }; pushBackend() } }
     @Published var syncFavorites: Bool { didSet { if !loadingUser { saveUserSetting("syncFavorites", syncFavorites ? "1" : "0") }; pushBackend() } }
@@ -218,10 +252,8 @@ final class AppModel: ObservableObject {
         syncFavorites = UserDefaults.standard.bool(forKey: "syncFavorites")
         backend = ServerBackend(db: db, name: UserDefaults.standard.string(forKey: "server.name") ?? Host.current().localizedName ?? "My Mac")
         server = HTTPServer(handler: { [backend] in backend.handle($0) })
-        player = PlayerEngine(urlFor: { t in
-            URL(fileURLWithPath: UserDefaults.standard.string(forKey: "musicRoot") ?? "/", isDirectory: true).appendingFile(t.relPath)
-        })
-        yt = YouTubeManager(db: db, root: { [weak self] in self?.musicRoot }, rootIsRemote: { [weak self] in self?.rootIsRemote ?? false }, onDownloaded: { [weak self] rel in await self?.indexFile(rel) })
+        player = PlayerEngine(urlFor: { [backend] t in backend.playbackURL(t.relPath) })
+        yt = YouTubeManager(db: db, root: { [weak self] in self?.isRootAvailable == true ? self?.musicRoot : nil }, rootIsRemote: { [weak self] in self?.rootIsRemote ?? false }, onDownloaded: { [weak self] rel in await self?.indexFile(rel) })
 
         pushBackend()
         backend.onStatsUploaded = { [weak self] in
@@ -278,19 +310,32 @@ final class AppModel: ObservableObject {
         backend.onSyncApplied = { [weak self] res in Task { @MainActor in self?.afterSyncApplied(res) } }
 
         if let root = musicRoot {
-            let reachable = Self.isFolderReachable(root)
-            isRootAvailable = reachable
-            if reachable {
+            if Self.isFolderReachable(root) {
+                source = .folder(root)
+                pushBackend()   // an initializer's assignment doesn't run didSet
                 startServer()
                 checkRemote()
                 yt.start()
                 player.restoreState(lookup: store.track)   // pick up where you left off
                 Task { await rescan() }
+            } else {
+                Task { await fallBackToServer() }
+            }
+        } else if UserDefaults.standard.bool(forKey: Self.serverChosenKey), let base = web.baseURL {
+            // keep the library usable even if the server is off right now
+            source = .server(base)
+            pushBackend()
+            Task { await startStreaming() }
+        }
+        let wsc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            wsc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.volumesChanged() }
             }
         }
     }
 
-    static func isFolderReachable(_ url: URL) -> Bool {
+    nonisolated static func isFolderReachable(_ url: URL) -> Bool {
         (try? url.checkResourceIsReachable()) == true
     }
 
@@ -303,18 +348,87 @@ final class AppModel: ObservableObject {
 
     /// Re-check if the configured musicRoot folder is mounted and reachable.
     func checkRootAvailability() {
-        guard let root = musicRoot else { isRootAvailable = false; return }
-        let reachable = Self.isFolderReachable(root)
-        if reachable {
+        guard let root = musicRoot else { return }
+        if Self.isFolderReachable(root) {
             let wasUnavailable = !isRootAvailable
-            isRootAvailable = true
+            source = .folder(root)
             startServices()
             if wasUnavailable {
-                player.restoreState(lookup: store.track)
+                if player.current == nil { player.restoreState(lookup: store.track) }
                 Task { await rescan() }
             }
         } else {
-            isRootAvailable = false
+            if isRootAvailable { source = .none }
+            Task { await fallBackToServer() }
+        }
+    }
+
+    /// A volume came or went: switch between the music root and the server if that changed anything.
+    private func volumesChanged() {
+        guard let root = musicRoot else { return }
+        Task {
+            let reachable = await offMain { Self.isFolderReachable(root) }
+            if reachable != isRootAvailable { checkRootAvailability() }
+        }
+    }
+
+    // MARK: songs from the web player
+
+    /// The music root is out of reach: carry on from the web player if one is set up and answering.
+    private func fallBackToServer() async {
+        guard source == .none, let base = web.baseURL,
+              (try? await web.fetchInfo(base)) != nil, source == .none else { return }
+        source = .server(base)
+        await startStreaming()
+    }
+
+    /// Use this web player for the index and the files, with no folder to mount or scan.
+    func useServer(base: URL, token: String) async {
+        web.url = base.absoluteString
+        web.token = token
+        // Chosen with no root: stay on the server. With a root it's only until that's back.
+        if musicRoot == nil { UserDefaults.standard.set(true, forKey: Self.serverChosenKey) }
+        source = .server(base)
+        await startStreaming()
+    }
+
+    private func startStreaming() async {
+        if !server.isRunning { startServer() }   // iPhones still sync from this Mac
+        await refreshServerIndex()
+        if player.current == nil { player.restoreState(lookup: store.track) }
+        web.syncSoon(after: 0)   // plays, favorites and playlists from the peers
+    }
+
+    /// The regular sync reached the web player: follow an edited address, pick up a changed library.
+    func serverAnswered(at base: URL, info: WebPlayerInfo) async {
+        guard usingServer else { return }
+        if source != .server(base) { source = .server(base) }
+        if info.libraryVersion == nil || info.libraryVersion != serverIndexVersion { await refreshServerIndex() }
+    }
+
+    /// Bring the local index up to date with the server's.
+    func refreshServerIndex() async {
+        guard case .server(let base) = source, !isRefreshingServerIndex else { return }
+        isRefreshingServerIndex = true
+        isScanning = true
+        defer { isRefreshingServerIndex = false; isScanning = false }
+        scanStatus = "Reading the library from the server…"
+        do {
+            // read before the list: a change in between only causes one extra refresh later
+            let info = try await web.fetchInfo(base)
+            let remote = try await web.fetchTracks(base)
+            let updateKnown = musicRoot == nil
+            let db = self.db
+            try await Task.detached(priority: .utility) {
+                try db.mergeServerIndex(remote, updateKnown: updateKnown)
+                db.refreshCache()
+            }.value
+            await store.reloadNow()
+            player.refreshAll(store.track)
+            serverIndexVersion = info.libraryVersion
+            scanStatus = (musicRoot == nil ? "" : "Music folder not mounted · ") + "streaming \(store.tracks.count) songs from the server"
+        } catch {
+            scanStatus = "Can't reach the server: \(error.localizedDescription)"
         }
     }
 
@@ -341,7 +455,9 @@ final class AppModel: ObservableObject {
         Task { rootIsRemote = await offMain { root.isOnNetworkVolume } }
     }
 
-    private func pushBackend() { backend.update(root: musicRoot, selection: selection, syncFavorites: syncFavorites) }
+    private func pushBackend() {
+        backend.update(source: source, selection: selection, syncFavorites: syncFavorites)
+    }
 
     /// Is this song or folder ticked for iPhone sync (directly or through a folder above it)?
     func isSynced(_ path: String) -> Bool { selection.contains(relPath: path) }
@@ -576,15 +692,17 @@ final class AppModel: ObservableObject {
     /// Use `url` as the music root: save it, point the server at it, and scan.
     func setRoot(_ url: URL) async {
         musicRoot = url
-        isRootAvailable = Self.isFolderReachable(url)
         UserDefaults.standard.set(url.path, forKey: "musicRoot")
-        pushBackend()
+        UserDefaults.standard.removeObject(forKey: Self.serverChosenKey)
+        source = Self.isFolderReachable(url) ? .folder(url) : .none
         if isRootAvailable {
             startServices()
             await rescan()
             if selection.paths.isEmpty && !syncFavorites {
                 selection = FolderSelection(paths: Set(store.folderRoot.subfolders.map(\.path)))
             }
+        } else {
+            await fallBackToServer()
         }
     }
 
@@ -603,7 +721,8 @@ final class AppModel: ObservableObject {
     }
 
     func rescan() async {
-        guard let root = musicRoot, isRootAvailable, !isScanning else { return }
+        if usingServer { await refreshServerIndex(); return }
+        guard case .folder(let root) = source, !isScanning else { return }
         isScanning = true; scanStatus = "Scanning…"
         let known = db.fileStamps()
         let result = await AudioScanner.scan(root: root, known: known, origin: .server) { done, total in
@@ -699,7 +818,10 @@ final class AppModel: ObservableObject {
         return (removed, failed)
     }
 
-    func revealInFinder(_ t: Track) { NSWorkspace.shared.activateFileViewerSelecting([url(for: t)]) }
+    func revealInFinder(_ t: Track) {
+        guard isRootAvailable else { NSSound.beep(); return }
+        NSWorkspace.shared.activateFileViewerSelecting([url(for: t)])
+    }
 
     /// Duplicates removed on the web player: fold each into its kept copy here (the file is already
     /// gone from the share), so this Mac, the iPhones and the next push all agree.
@@ -757,7 +879,7 @@ final class AppModel: ObservableObject {
     /// Permanently deletes songs from disk, removes them from library, queue and playlists,
     /// and marks them as deleted in YouTube Liked (Do not download).
     func deleteSongs(_ tracks: [Track]) {
-        guard !tracks.isEmpty else { return }
+        guard isRootAvailable, !tracks.isEmpty else { return }   // no files to delete when streaming
         let paths = tracks.map(\.relPath)
         let pathSet = Set(paths)
 

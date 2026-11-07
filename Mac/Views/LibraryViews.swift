@@ -155,23 +155,25 @@ struct TrackTable: View {
         }
         if let first = picked.first {
             items.append(ClosureMenuItem("Show in Folder") { model.reveal(first, in: .folder) })
-            items.append(ClosureMenuItem("Show in Finder") { model.revealInFinder(first) })
+            if model.isRootAvailable { items.append(ClosureMenuItem("Show in Finder") { model.revealInFinder(first) }) }
         }
-        items.append(.separator())
-        items.append(ClosureMenuItem(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song") {
-            if picked.count == 1 {
-                model.deleteSongs(picked)
-            } else {
-                tracksPendingDelete = picked
-                confirmDelete = true
-            }
-        })
+        if model.isRootAvailable {
+            items.append(.separator())
+            items.append(ClosureMenuItem(picked.count > 1 ? "Delete \(picked.count) Songs" : "Delete Song") {
+                if picked.count == 1 {
+                    model.deleteSongs(picked)
+                } else {
+                    tracksPendingDelete = picked
+                    confirmDelete = true
+                }
+            })
+        }
         return items
     }
 
     private func triggerShortcutDelete(rows: [Track]) {
         let picked = rows.filter { selection.contains($0.id) }
-        guard !picked.isEmpty else { return }
+        guard model.isRootAvailable, !picked.isEmpty else { return }
         tracksPendingDelete = picked
         confirmDelete = true
     }
@@ -412,7 +414,11 @@ struct PlayerBar: View {
                 ArtworkView(image: player.artwork, size: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(player.current?.title ?? "Not Playing").font(.headline).lineLimit(1)
-                    Text(player.current.map { "\($0.displayArtist) — \($0.displayAlbum)" } ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if let error = player.playbackError {
+                        Text(error).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    } else {
+                        Text(player.current.map { "\($0.displayArtist) — \($0.displayAlbum)" } ?? " ").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }.frame(width: 220, alignment: .leading)
             }
             .contentShape(Rectangle())
@@ -422,8 +428,10 @@ struct PlayerBar: View {
                 if let t = currentTrack {
                     Button("Show in Songs") { model.reveal(t, in: .songs) }
                     Button("Show in Folder") { model.reveal(t, in: .folder) }
-                    Divider()
-                    Button("Show in Finder") { model.revealInFinder(t) }
+                    if model.isRootAvailable {
+                        Divider()
+                        Button("Show in Finder") { model.revealInFinder(t) }
+                    }
                 }
             }
             .help(player.current == nil ? "" : "Double-click to show in Songs")

@@ -61,6 +61,19 @@ The web player announces itself over Bonjour (`_mymusic-web._tcp`):
   — play counts, favorites, iPhone backups, YouTube queue and sync settings — from the copy the main
   Mac uploads here every 30 minutes (`mac-library-backup.sqlite`, next to the database).
 
+## Streaming to a Mac (no share, no scan)
+
+A Mac can use the web player as its library, using the song list the server already has
+(`GET /api/tracks`) and the files from `GET /api/stream`:
+* **First run**: *Stream from \<server\>* on the welcome screen. It stays on the server until you pick a
+  music folder in Settings.
+* **Music folder not mounted**: a Mac with a web player address carries on from the server by itself,
+  and goes back to the folder (with a rescan) when it's mounted again.
+
+Plays, favorites and playlists sync as usual. While streaming the Mac never pushes its library here.
+iPhones can still sync from a streaming Mac: it sends them here for the files. Deleting songs,
+finding duplicates and YouTube downloads need the folder.
+
 ## Flags
 | flag | env | default | |
 |---|---|---|---|

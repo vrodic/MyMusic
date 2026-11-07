@@ -112,6 +112,31 @@ final class LibraryDB: @unchecked Sendable {
         }
     }
 
+    /// Take the web player's song list as this device's index. Songs it doesn't list are gone: their
+    /// files can't be played from there. Known songs keep their spelling (a scan may have used
+    /// another accent encoding). `updateKnown` also takes the server's size and mtime for them;
+    /// leave it off while a music folder is configured, or its next scan would re-read those files.
+    func mergeServerIndex(_ remote: [Track], updateKnown: Bool) throws {
+        let local = fileStamps()
+        var spelling: [String: String] = [:]
+        for p in local.keys { spelling[SyncStore.key(p)] = p }
+        var seen = Set<String>()
+        var changes: [Track] = []
+        for var t in remote {
+            let k = SyncStore.key(t.relPath)
+            seen.insert(k)
+            t.origin = .server   // like a scanned song; where its bytes come from depends on the mode
+            if let known = spelling[k] {
+                guard updateKnown, let s = local[known], s.0 != t.size || abs(s.1 - t.mtime) > 1 else { continue }
+                t.relPath = known
+            }
+            changes.append(t)
+        }
+        try upsert(changes)
+        // an empty list means a server still starting up, not a library with no songs
+        if !remote.isEmpty { try delete(local.keys.filter { !seen.contains(SyncStore.key($0)) }) }
+    }
+
     /// Re-key a song (same file, different spelling of its path, e.g. accent encoding).
     func renamePath(_ old: String, to new: String, origin: TrackOrigin) {
         try? db.execute("UPDATE tracks SET rel_path = ?, origin = ? WHERE rel_path = ?", [new, origin.rawValue, old])
