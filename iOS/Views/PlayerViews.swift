@@ -47,20 +47,25 @@ struct NowPlayingView: View {
     @State private var showQueue = false
 
     var body: some View {
-        // A plain page when it fits. Only a long title that makes it too tall needs scrolling.
+        // Shrink the artwork until everything, down to the playback mode menu, fits on screen.
+        // Only if even the smallest artwork doesn't fit (a very long title) does the page scroll.
         ViewThatFits(in: .vertical) {
-            page
-            ScrollView { page.containerRelativeFrame(.horizontal) }
+            page(art: 300, spacing: 22)
+            page(art: 260, spacing: 18)
+            page(art: 220, spacing: 16)
+            page(art: 180, spacing: 14)
+            page(art: 140, spacing: 12)
+            ScrollView { page(art: 300, spacing: 22).containerRelativeFrame(.horizontal) }
         }
         .sheet(isPresented: $showQueue) { NavigationStack { QueueView() } }
         .presentationDragIndicator(.hidden)
     }
 
-    private var page: some View {
-        VStack(spacing: 22) {
+    private func page(art: CGFloat, spacing: CGFloat) -> some View {
+        VStack(spacing: spacing) {
             Capsule().fill(.secondary.opacity(0.4)).frame(width: 40, height: 5).padding(.top, 8)
             Spacer(minLength: 0)
-            ArtworkView(image: player.artwork, size: 300).shadow(radius: 16)
+            ArtworkView(image: player.artwork, size: art).shadow(radius: 16)
             if let t = player.current {
                 let live = store.track(t.relPath) ?? t
                 HStack {
