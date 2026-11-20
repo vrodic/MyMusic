@@ -41,6 +41,8 @@ struct NowPlayingView: View {
     @EnvironmentObject var player: PlayerEngine
     @EnvironmentObject var model: IOSModel
     @EnvironmentObject var store: LibraryStore
+    @EnvironmentObject var nav: Navigator
+    @Environment(\.dismiss) private var dismiss
     @State private var scrub: Double?
     @State private var showQueue = false
 
@@ -75,6 +77,7 @@ struct NowPlayingView: View {
                     Button { model.toggleFavorite(live) } label: {
                         Image(systemName: live.favorite ? "heart.fill" : "heart").font(.title2).foregroundStyle(.pink)
                     }
+                    songMenu(live)
                 }
             }
             WithPlaybackTime(clock: player.clock) { now in
@@ -96,26 +99,83 @@ struct NowPlayingView: View {
             }
             .font(.largeTitle).buttonStyle(.plain)
             HStack {
-                Button { player.shuffle.toggle() } label: {
-                    Image(systemName: "shuffle").foregroundStyle(player.shuffle ? Color.accentColor : .secondary)
-                }
+                PlaybackModeMenu()
                 Spacer()
                 RoutePicker().frame(width: 36, height: 36)
-                Spacer()
-                Button { showQueue = true } label: { Image(systemName: "list.bullet") }
-                Spacer()
-                Button {
-                    let all = RepeatMode.allCases
-                    player.repeatMode = all[(all.firstIndex(of: player.repeatMode)! + 1) % all.count]
-                } label: {
-                    Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat").foregroundStyle(player.repeatMode == .off ? .secondary : Color.accentColor)
-                }
+                Button { showQueue = true } label: { Image(systemName: "list.bullet") }.padding(.leading, 12)
             }
             .font(.title3).padding(.horizontal, 8)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 28)
         .frame(maxWidth: .infinity)
+    }
+}
+
+extension NowPlayingView {
+    /// Find the playing song in the library. Streamed songs (not on this iPhone) aren't in it.
+    private func songMenu(_ t: Track) -> some View {
+        let onDevice = store.track(t.relPath) != nil
+        return Menu {
+            Button { dismiss(); nav.showInSongs(t) } label: { Label("Show in Songs", systemImage: "music.note.list") }
+                .disabled(!onDevice)
+            Button { dismiss(); nav.showInFolder(t) } label: { Label("Show in Folder", systemImage: "folder") }
+                .disabled(!onDevice)
+            AddToPlaylistMenu(tracks: [t])
+        } label: {
+            Image(systemName: "ellipsis.circle").font(.title2).padding(.leading, 8)
+        }
+        .menuOrder(.fixed)
+    }
+}
+
+/// Shuffle and repeat in one menu that says, in words, what happens next.
+struct PlaybackModeMenu: View {
+    @EnvironmentObject var player: PlayerEngine
+
+    var body: some View {
+        Menu {
+            Section("Order") {
+                option("In Order", "arrow.right", !player.shuffle) { player.shuffle = false }
+                option("Shuffle", "shuffle", player.shuffle) { player.shuffle = true }
+            }
+            Section("When a song ends") {
+                option("Play Next, Stop at End", "forward.end", player.repeatMode == .off) { player.repeatMode = .off }
+                option("Play Next, Repeat All", "repeat", player.repeatMode == .all) { player.repeatMode = .all }
+                option("Repeat This Song", "repeat.1", player.repeatMode == .one) { player.repeatMode = .one }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                Text(summary).font(.subheadline.weight(.medium)).lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down").font(.caption2)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .foregroundStyle(isDefault ? Color.primary : Color.accentColor)
+            .background(.secondary.opacity(0.15), in: Capsule())
+        }
+        .menuOrder(.fixed)
+    }
+
+    /// A checkmarked menu row (a Toggle), so the section titles stay visible.
+    private func option(_ title: String, _ icon: String, _ on: Bool, _ select: @escaping () -> Void) -> some View {
+        Toggle(isOn: Binding(get: { on }, set: { if $0 { select() } })) { Label(title, systemImage: icon) }
+    }
+
+    private var isDefault: Bool { !player.shuffle && player.repeatMode == .off }
+    private var icon: String {
+        switch player.repeatMode {
+        case .one: "repeat.1"
+        case .all: player.shuffle ? "shuffle" : "repeat"
+        case .off: player.shuffle ? "shuffle" : "arrow.right"
+        }
+    }
+    private var summary: String {
+        switch player.repeatMode {
+        case .one: "Repeat This Song"
+        case .all: player.shuffle ? "Shuffle · Repeat All" : "In Order · Repeat All"
+        case .off: player.shuffle ? "Shuffle" : "In Order"
+        }
     }
 }
 

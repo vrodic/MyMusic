@@ -8,6 +8,7 @@ final class IOSModel: ObservableObject {
     let store: LibraryStore
     let player: PlayerEngine
     let browser = ServerBrowser()
+    let nav = Navigator()
     lazy var sync = SyncManager(model: self)
     lazy var web = WebLibrary(model: self)
 

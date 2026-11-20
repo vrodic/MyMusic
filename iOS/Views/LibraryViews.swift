@@ -9,8 +9,8 @@ struct LibraryHome: View {
     var body: some View {
         List {
             Section {
-                NavigationLink { TrackListView(title: "Songs", tracks: store.tracks) } label: { Label("Songs", systemImage: "music.note") }
-                NavigationLink { FolderView(path: "") } label: { Label("Folders", systemImage: "folder") }
+                NavigationLink(value: LibraryRoute.songs) { Label("Songs", systemImage: "music.note") }
+                NavigationLink(value: FolderRoute(path: "")) { Label("Folders", systemImage: "folder") }
                 NavigationLink { ArtistsView() } label: { Label("Artists", systemImage: "music.mic") }
                 NavigationLink { AlbumsView() } label: { Label("Albums", systemImage: "square.stack") }
             }
@@ -30,6 +30,8 @@ struct LibraryHome: View {
             }
         }
         .navigationTitle("Library")
+        .navigationDestination(for: LibraryRoute.self) { _ in TrackListView(title: "Songs", tracks: store.tracks) }
+        .navigationDestination(for: FolderRoute.self) { FolderView(path: $0.path) }
         .toolbar {
             ToolbarItem {
                 Button { importing = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
@@ -58,12 +60,14 @@ struct FolderView: View {
         // Searching covers this folder and everything below it.
         let folders = node.map { q.isEmpty ? $0.subfolders : $0.searchFolders(q) } ?? []
         let tracks = node.map { q.isEmpty ? $0.tracks : store.filter($0.allTracks, query) } ?? []
-        List {
+        let playable = q.isEmpty ? (node?.allTracks ?? []) : tracks
+        RevealingList(ids: tracks.map(\.relPath)) {
+            if !playable.isEmpty { PlayButtonsRow(tracks: playable) }
             if node != nil {
                 if !folders.isEmpty {
                     Section(q.isEmpty ? "" : "Folders") {
                         ForEach(folders) { f in
-                            NavigationLink { FolderView(path: f.path) } label: {
+                            NavigationLink(value: FolderRoute(path: f.path)) {
                                 HStack {
                                     Image(systemName: f.path == "yt" ? "play.rectangle.fill" : "folder.fill")
                                         .foregroundStyle(f.path == "yt" ? .red : .blue)
@@ -91,7 +95,7 @@ struct FolderView: View {
         }
         .navigationTitle(node?.path.isEmpty ?? true ? "Folders" : node!.name)
         .searchable(text: $query, prompt: node?.path.isEmpty ?? true ? "Search folders and songs" : "Search in \(node!.name)")
-        .toolbar { PlayShuffleToolbar(tracks: q.isEmpty ? (node?.allTracks ?? []) : tracks) }
+        .toolbar { PlayShuffleToolbar(tracks: playable) }
         .overlay {
             if store.tracks.isEmpty { ContentUnavailableView("No music yet", systemImage: "music.note", description: Text("Sync from your Mac, or drop folders into On My iPhone → MyMusic → Music in the Files app.")) }
             else if !q.isEmpty && folders.isEmpty && tracks.isEmpty { ContentUnavailableView.search(text: query) }
@@ -110,7 +114,10 @@ struct TrackListView: View {
     var body: some View {
         let q = query.trimmingCharacters(in: .whitespaces)
         let shown = store.filter(tracks, q)
-        List { TrackRows(tracks: shown) }
+        RevealingList(ids: shown.map(\.relPath)) {
+            if !shown.isEmpty { PlayButtonsRow(tracks: shown) }
+            TrackRows(tracks: shown)
+        }
             .navigationTitle(title)
             .searchable(text: $query, prompt: "Search \(title)")
             .toolbar { PlayShuffleToolbar(tracks: shown) }
@@ -135,13 +142,55 @@ struct PlayShuffleToolbar: ToolbarContent {
                 Button { tracks.forEach(player.addToQueue) } label: { Label("Add All to Queue", systemImage: "text.append") }
             } label: { Image(systemName: "ellipsis.circle") }
                 .disabled(tracks.isEmpty)
-            Button { player.shuffle = false; player.play(tracks) } label: { Image(systemName: "play.fill") }.disabled(tracks.isEmpty)
-            Button { player.shuffle = true; player.play(tracks, startAt: Int.random(in: 0..<max(tracks.count, 1))) } label: { Image(systemName: "shuffle") }.disabled(tracks.isEmpty)
         }
     }
 }
 
+/// "Play" and "Shuffle" spelled out at the top of a list. Play always plays in order (and turns
+/// shuffle off); while shuffle is on, it says so, since tapping a song then shuffles the rest.
+struct PlayButtonsRow: View {
+    @EnvironmentObject var player: PlayerEngine
+    let tracks: [Track]
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Button { player.shuffle = false; player.play(tracks) } label: {
+                    Label(player.shuffle ? "Play in Order" : "Play", systemImage: "play.fill")
+                        .lineLimit(1).minimumScaleFactor(0.8).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                // filled while shuffle is on, so the button also shows the current mode
+                Group {
+                    if player.shuffle {
+                        Button(action: shuffle) { shuffleLabel }.buttonStyle(.borderedProminent)
+                    } else {
+                        Button(action: shuffle) { shuffleLabel }.buttonStyle(.bordered)
+                    }
+                }
+            }
+            .controlSize(.large).font(.headline)
+            if player.shuffle {
+                Text("Shuffle is on: tapping a song plays the rest in random order. Play in Order turns it off.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
+            }
+        }
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+    }
+
+    private var shuffleLabel: some View {
+        Label("Shuffle", systemImage: "shuffle").labelStyle(.titleAndIcon).lineLimit(1).frame(maxWidth: .infinity)
+    }
+    private func shuffle() {
+        player.shuffle = true
+        player.play(tracks, startAt: Int.random(in: 0..<max(tracks.count, 1)))
+    }
+}
+
 struct TrackRows: View {
+    @EnvironmentObject var nav: Navigator
     @EnvironmentObject var player: PlayerEngine
     @EnvironmentObject var model: IOSModel
     @EnvironmentObject var store: LibraryStore
@@ -154,6 +203,7 @@ struct TrackRows: View {
                 TrackRowLabel(track: t, isCurrent: player.current?.relPath == t.relPath).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .listRowBackground(nav.revealed == t.relPath ? Color.accentColor.opacity(0.2) : nil)
             .swipeActions(edge: .leading) {
                 Button { model.toggleFavorite(t) } label: { Image(systemName: t.favorite ? "heart.slash" : "heart") }.tint(.pink)
             }
@@ -167,6 +217,7 @@ struct TrackRows: View {
 }
 
 struct TrackMenu: View {
+    @EnvironmentObject var nav: Navigator
     @EnvironmentObject var player: PlayerEngine
     @EnvironmentObject var model: IOSModel
     let track: Track
@@ -175,6 +226,7 @@ struct TrackMenu: View {
         Button { player.addToQueue(track) } label: { Label("Add to Queue", systemImage: "text.append") }
         Button { model.toggleFavorite(track) } label: { Label(track.favorite ? "Unfavorite" : "Favorite", systemImage: track.favorite ? "heart.slash" : "heart") }
         AddToPlaylistMenu(tracks: [track])
+        Button { nav.showInFolder(track) } label: { Label("Show in Folder", systemImage: "folder") }
         ShareLink(item: model.url(for: track)) { Label("Share / Open In…", systemImage: "square.and.arrow.up") }
         Section("\(track.playCount) plays · \(track.fileExtension.uppercased()) · \(ByteCountFormatter.string(fromByteCount: track.size, countStyle: .file))") {
             Button(role: .destructive) { model.deleteFromDevice([track]) } label: { Label("Remove from iPhone", systemImage: "trash") }

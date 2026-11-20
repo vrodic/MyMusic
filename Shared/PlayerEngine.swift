@@ -187,8 +187,8 @@ final class PlayerEngine: ObservableObject {
     @Published private(set) var artwork: PlatformImage?
     /// Why the current song isn't playing, for the player bar.
     @Published private(set) var playbackError: String?
-    @Published var shuffle = false { didSet { if !restoring { applyShuffle() } } }
-    @Published var repeatMode: RepeatMode = .off
+    @Published var shuffle = false { didSet { if !restoring { applyShuffle(); saveState() } } }
+    @Published var repeatMode: RepeatMode = .off { didSet { saveState() } }
     @Published var volume: Float = 1 { didSet { player.volume = volume } }
 
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
